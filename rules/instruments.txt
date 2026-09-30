@@ -1,0 +1,37 @@
+# 乐器写法 → 英文乐器名。一行一条：`写法 = 英文名`，# 开头是注释。
+#
+# 命中的行会搬成 performer:<英文名>（例：`吉他：张三` → performer:guitar = 张三）。
+# 和 roles.txt 一样是保守判据：查不到就不搬。
+#
+# 想加新乐器：直接在下面加一行，比如  二胡 = erhu
+
+12弦木吉他 = 12-string guitar
+木吉他 = acoustic guitar
+中音萨克斯 = alto saxophone
+上低音萨克斯 = baritone saxophone
+贝斯 = bass
+低音单簧管 = bass clarinet
+大提琴 = cello
+笛子 = dizi
+提琴贝斯 = double bass
+doublebass = double bass
+鼓 = drums
+电吉他 = electric guitar
+次中音号 = euphonium
+长笛 = flute
+吉他 = guitar
+古筝 = guzheng
+硬件噪音 = hardware noise
+键盘 = keyboard
+莱雅琴 = lyre
+打击乐 = percussion
+钢琴 = piano
+阮 = ruan
+采样 = sampling
+萨克斯 = saxophone
+唢呐 = suona
+次中音萨克斯 = tenor saxophone
+长号 = trombone
+小号 = trumpet
+中提琴 = viola
+小提琴 = violin

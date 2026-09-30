@@ -1,0 +1,69 @@
+# 作者/职位写法 → 规范字段。一行一条：`写法 = 字段`，# 开头是注释。
+#
+# 这张表决定"什么算作者信息"：只有当整行的角色部分**全部**能在这里查到，
+# 才会被当成作者行搬进音频标签（parse_credit_line 的保守判据）。
+# 查不到的写法一律按歌词保留 —— 宁可漏搬，不可错删。
+#
+# 字段名会被写入音频标签：mp3 走 TEXT/TCOM/TIPL/TMCL/TXXX，
+# flac/ogg 走同名 Vorbis 键，m4a 走 ----:com.apple.iTunes:<字段大写>。
+# `performer:<乐器>` 形式见 instruments.txt。
+#
+# 想加新写法：直接在下面加一行，比如  作词 = lyricist
+
+编曲 = arranger
+編曲 = arranger
+arranger = arranger
+arrangedby = arranger
+管乐编写 = arranger
+作曲 = composer
+曲 = composer
+composer = composer
+composedby = composer
+musicby = composer
+music = composer
+kyoku = composer
+封面 = cover_art
+illustration = cover_art
+翻唱 = cover_vocalist
+录音 = engineer
+engineer = engineer
+recordedby = engineer
+人声录音 = engineer
+器乐录音 = engineer
+音频编辑 = engineer
+人声工程师 = engineer
+作词 = lyricist
+作詞 = lyricist
+词 = lyricist
+詞 = lyricist
+lyricist = lyricist
+lyrics = lyricist
+lyricsby = lyricist
+shi = lyricist
+母带 = mastering
+masteredby = mastering
+混音 = mixer
+mixer = mixer
+mixedby = mixer
+原唱 = original_vocalist
+人声 = performer
+主唱 = performer
+演唱 = performer
+唱 = performer
+歌手 = performer
+和声 = performer
+vocal = performer
+vocalist = performer
+singer = performer
+制作人 = producer
+制作 = producer
+producer = producer
+producedby = producer
+p主 = producer
+来源 = source
+翻译取自 = source
+轴 = subtitle_timing
+监制 = supervisor
+译 = translator
+翻译 = translator
+writtenby = writer

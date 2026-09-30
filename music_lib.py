@@ -6,27 +6,44 @@ This single script replaces the former set:
     fix_ogg_titles.py + extract_lrc_rmpc.py + normalize_no_lyrics.py
     + bilingual_lrc.py + reorder_romaji.py + one_click_update.sh
 
+The library standard it enforces:
+
+* a ``.lrc`` holds lyrics and nothing but lyrics -- no ``[ti:]``/``[ar:]``/
+  ``[al:]``/``[length:]`` header, no author lines, no source-site notice, no
+  site metadata blob.  A song without lyrics gets exactly one line,
+  ``[00:00.00]No lyrics``;
+* every line of a same-timestamp group carries that timestamp, so the original,
+  the romaji and the translation of one line stay together;
+* the audio file's name is ``<title> - <artist>.<ext>``, taken from its own tags.
+
 Steps, executed in this order by default:
 
     ogg        fill missing/empty OGG title tags from the file name
     extract    extract embedded timed lyrics into rmpc-compatible .lrc files
-    credits    move author info (作词/作曲/编曲/…) from .lrc into audio tags
-    nolyrics   write "[00:00.00]No lyrics" for songs without real lyrics
-    bilingual  group same-timestamp lyric lines consecutively
+    clean      leave nothing but lyrics: move author info into audio tags
+               (rules/roles.txt) and drop headers, credits and source-site
+               notices (rules/notices.txt)
+    nolyrics   write the single "[00:00.00]No lyrics" line when a song has none
+    bilingual  give untimed translation/romaji lines their neighbour's
+               timestamp, then group same-timestamp lines together
     romaji     move romaji lines between the original and the Chinese line
 
-After the steps, the MPD database is refreshed with ``rmpc update`` (falling
-back to ``mpc update``) unless ``--no-refresh`` or ``--dry-run`` is used.
+Each step runs twice in an interactive run: first in **plan** mode, which writes
+the full report and changes nothing, then -- only after you confirm it -- in
+**apply** mode.  Pressing Enter at the prompt shows the head of that report, so
+the decision is made with the whole list in front of you.  Nothing is ever
+dropped from a ``.lrc`` without appearing in a report.
 
-Every step rewrites only what it understands: lines it cannot parse (untimed
-text, timestamps out of range, stray header tags) are preserved verbatim, and a
-file that fails to write is reported without stopping the remaining files.
+``--dry-run`` writes nothing at all, reports included.  ``--yes`` applies without
+asking (for non-interactive use); without it, a run whose stdin is not a terminal
+refuses to write.  ``--backup`` keeps this run's originals under
+``backups/<timestamp>/``: ``.lrc`` files in full, audio files as a tag dump.
 
 Examples:
-    ./music_lib.py                                  # full pipeline
-    ./music_lib.py --dry-run                        # show, change nothing
-    ./music_lib.py /path/to/Music --steps extract,bilingual
-    ./music_lib.py --steps ogg --backup
+    ./music_lib.py                                  # interactive full pipeline
+    ./music_lib.py --dry-run                        # show, write nothing at all
+    ./music_lib.py --steps clean,bilingual --backup
+    ./music_lib.py /path/to/Music --steps extract --yes
     ./music_lib.py --steps bilingual --only-duplicates
     ./music_lib.py --steps bilingual --max-lines 2
 """
@@ -38,6 +55,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -56,11 +74,70 @@ DEFAULT_MUSIC_DIR = "/home/NeedtoPratice/Music"
 # Everything this tool generates stays inside musicManage/: review reports here,
 # backups under backups/<timestamp>/ (see README.md).
 DEFAULT_REPORT_DIR = SCRIPT_DIR / "reports"
+DEFAULT_BACKUP_DIR = SCRIPT_DIR / "backups"
+# Editable rules (see README.md).  These are data, not code: adding a new source
+# site notice or a new credit spelling means editing a text file, not this file.
+RULES_DIR = SCRIPT_DIR / "rules"
+MANUAL_DIR = SCRIPT_DIR / "manual"
+
+
+def load_rule_pairs(path: Path) -> dict[str, str]:
+    """Read ``key = value`` lines.  ``#`` only comments out a whole line."""
+    out: dict[str, str] = {}
+    if not path.is_file():
+        print(f"Warning: rule file missing: {path}", file=sys.stderr)
+        return out
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key, value = key.strip(), value.strip()
+        if key and value:
+            out[key] = value
+    return out
+
+
+def load_rule_patterns(path: Path) -> list[re.Pattern[str]]:
+    """Read one regular expression per line.  ``#`` only comments out a whole line."""
+    out: list[re.Pattern[str]] = []
+    if not path.is_file():
+        print(f"Warning: rule file missing: {path}", file=sys.stderr)
+        return out
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            out.append(re.compile(line))
+        except re.error as e:
+            print(f"Warning: bad pattern in {path}: {line!r} ({e})", file=sys.stderr)
+    return out
+
+
+def load_rule_names(path: Path) -> set[str]:
+    """Read one name per line (used for the manual 'this is instrumental' list)."""
+    if not path.is_file():
+        print(f"Warning: rule file missing: {path}", file=sys.stderr)
+        return set()
+    return {
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    }
+
+
+# Files a human has declared instrumental: their .lrc body is discarded (after
+# any recognisable credits are moved to tags) and rewritten as "[00:00.00]No lyrics".
+MANUAL_INSTRUMENTAL = load_rule_names(MANUAL_DIR / "instrumental.txt")
 
 AUDIO_EXTS = {".mp3", ".flac", ".ogg", ".oga", ".m4a", ".mp4", ".m4b"}
 
 # How many removed lines a --dry-run shows per file before collapsing.
 DRY_RUN_PREVIEW_LINES = 8
+
+# How many lines of a report the interactive prompt shows when you press Enter.
+REPORT_PREVIEW_LINES = 60
 
 # Matches [MM:SS], [MM:SS.x], [MM:SS.xx], [MM:SS.xxx], [MM:SS:xx]
 TIMESTAMP_RE = re.compile(r"\[(\d{1,2}:\d{2}(?:[.:]\d{1,3})?)\]")
@@ -114,7 +191,7 @@ NON_LYRIC_KEYWORDS = [
     "masteredby",
 ]
 
-STEP_ORDER = ["ogg", "extract", "credits", "nolyrics", "bilingual", "romaji"]
+STEP_ORDER = ["ogg", "extract", "clean", "nolyrics", "bilingual", "romaji"]
 
 
 # ---------------------------------------------------------------------------
@@ -257,12 +334,58 @@ def pad_bare_timestamp(ts: str) -> str:
     return ts
 
 
+def adopt_untimed_lines(body: list[str]) -> list[str]:
+    """Give every untimed lyric line the timestamp of the line above it.
+
+    This is what turns a bilingual file from
+
+        [00:10.17]春がきた
+        春天来了
+
+    into the shape the library standard asks for -- every line of a group
+    carrying that group's timestamp, so rmpc shows original, romaji and
+    translation together:
+
+        [00:10.17]春がきた
+        [00:10.17]春天来了
+
+    Only lines with **no** timestamp are touched, and only when a timestamp has
+    already been seen; a line the parser can read is never rewritten.  Blank
+    lines are copied through as they are and do **not** break the chain: a
+    translation separated from its original by a blank line still belongs to it,
+    and the blank simply ends up after the group in the output.
+    """
+    out: list[str] = []
+    last_ts: str | None = None
+    for line in body:
+        s = line.strip()
+        if not s:
+            out.append(line)
+            continue
+        split = split_lrc_line(line)
+        if split:
+            timestamps, _content = split
+            if timestamps and timestamp_to_ms(timestamps[0]) is not None:
+                last_ts = timestamps[0]
+            out.append(line)
+            continue
+        if LRC_HEADER_RE.match(s):
+            # A header tag that turns up after the first lyric is not a lyric
+            # continuation: give it a timestamp and it becomes a lyric line.
+            # `clean` removes it; until then, leave it exactly as it is.
+            out.append(line)
+            continue
+        out.append(f"[{last_ts}]{s}" if last_ts else line)
+    return out
+
+
 def regroup_body_lines(
     body: list[str],
     parse: Callable[[str], list[tuple[str, str]]],
     output_timestamp: Callable[[list[tuple[str, str]]], str],
     reorder: Callable[[list[tuple[str, str]]], list[tuple[str, str]]] | None = None,
     max_lines: int | None = None,
+    adopt: bool = False,
 ) -> tuple[list[str], int, int]:
     """Pull same-timestamp lines together, keeping every other line untouched.
 
@@ -272,11 +395,18 @@ def regroup_body_lines(
     ``[00:75.00]``, a header tag that appears after the first lyric.  Rebuilding
     the body from parsed groups alone would delete all of those silently.
 
+    With ``adopt`` the untimed lyric lines are first given their predecessor's
+    timestamp (see ``adopt_untimed_lines``) so translations and romaji join the
+    group they belong to instead of sitting outside every group.
+
     ``output_timestamp`` receives a whole group and returns the bracketed
     timestamp to print for every line of that group.
 
     Returns (new_body, groups_reordered, lines_dropped_by_max_lines).
     """
+    if adopt:
+        body = adopt_untimed_lines(body)
+
     groups: "OrderedDict[int, list[tuple[str, str]]]" = OrderedDict()
     parsed: list[list[tuple[str, str]]] = []
     for line in body:
@@ -347,24 +477,65 @@ class StepResult:
     counts: dict[str, int] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    reports: list[Path] = field(default_factory=list)
 
 
-def backup_text_file(path: Path, original: str) -> bool:
-    """Keep a .bak copy of a text file.  Never overwrites an existing backup."""
-    bak = path.with_suffix(path.suffix + ".bak")
-    if bak.exists():
-        return False
-    bak.write_text(original, encoding="utf-8")
-    return True
+def backup_dir_for(args: argparse.Namespace, path: Path) -> Path:
+    """Where this file's backup goes: musicManage/backups/<run>/, tree mirrored."""
+    try:
+        rel = path.resolve().relative_to(args.music_root)
+    except ValueError:
+        rel = Path(path.name)
+    return args.backup_dir / rel
 
 
-def backup_binary_file(path: Path) -> bool:
-    """Keep a .bak copy of an audio file.  Never overwrites an existing backup."""
-    bak = path.with_suffix(path.suffix + ".bak")
-    if bak.exists():
-        return False
-    shutil.copy2(path, bak)
-    return True
+def backup_text_file(path: Path, original: str, args: argparse.Namespace) -> Path | None:
+    """Keep this run's copy of a text file, as it looked before the run started.
+
+    Backups live under musicManage/backups/<timestamp>/ and mirror the library
+    tree, instead of piling .bak files up next to the music.  The first backup of
+    a run wins, so a file touched by several steps still has its pre-run content.
+    """
+    dest = backup_dir_for(args, path)
+    if dest.exists():
+        return None
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(original, encoding="utf-8")
+    except OSError as e:
+        print(f"    Warning: could not back up {path.name}: {e}", file=sys.stderr)
+        return None
+    return dest
+
+
+def dump_tags(path: Path, args: argparse.Namespace) -> Path | None:
+    """Back up a file's *tags* instead of copying the whole audio file.
+
+    The library is ~5.6 GB, so a full copy per run is the wrong shape; a tag dump
+    is a few kB and holds every value this tool can change.
+    """
+    dest = backup_dir_for(args, path).with_name(path.name + ".tags.txt")
+    if dest.exists():
+        return None
+    try:
+        audio = MutagenFile(path)
+    except Exception as e:  # noqa: BLE001
+        print(f"    Warning: could not read tags of {path.name}: {e}", file=sys.stderr)
+        return None
+    lines = [f"# tags of {path}", f"# container: {type(audio).__name__ if audio else 'unreadable'}"]
+    if audio is not None and audio.tags is not None:
+        for key in sorted(audio.tags.keys(), key=str):
+            try:
+                lines.append(f"{key} = {audio.tags[key]!r}")
+            except Exception:  # noqa: BLE001
+                lines.append(f"{key} = <unreadable>")
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except OSError as e:
+        print(f"    Warning: could not back up tags of {path.name}: {e}", file=sys.stderr)
+        return None
+    return dest
 
 
 def write_report(
@@ -372,12 +543,17 @@ def write_report(
     filename: str,
     header: str,
     items: list[str],
-    dry_run: bool,
+    args: argparse.Namespace,
 ) -> Path | None:
-    """Write a review report, or report how many lines it would hold."""
+    """Write a review report.
+
+    Interactive runs write the report *before* asking whether to apply the step,
+    so the decision is made with the full list in hand rather than from a
+    summary.  ``--dry-run`` writes nothing at all, reports included.
+    """
     if not items:
         return None
-    if dry_run:
+    if not args.write_reports:
         print(f"  Would write report {filename} ({len(items)} lines)")
         return None
     try:
@@ -453,9 +629,9 @@ def process_ogg(path: Path, args: argparse.Namespace) -> tuple[str, str | None, 
             return "skipped_empty_name", None, False
 
         backed_up = False
-        if not args.dry_run:
+        if args.apply:
             if args.backup:
-                backed_up = backup_binary_file(path)
+                backed_up = dump_tags(path, args) is not None
             tags["title"] = new_title
             audio.save()
 
@@ -488,7 +664,7 @@ def step_ogg(args: argparse.Namespace, root: Path) -> StepResult:
         elif status == "written":
             changed.append(f"{path}  ->  {detail}")
             if backed_up:
-                result.notes.append(f"backup: {path.name}.bak")
+                result.notes.append(f"tags backed up: {path.name}")
         if i % 50 == 0 or i == len(files):
             print(f"    ...{i}/{len(files)} processed")
 
@@ -507,10 +683,11 @@ def step_ogg(args: argparse.Namespace, root: Path) -> StepResult:
         "ogg_titles_report.txt",
         "These OGG files had no title tag and were given one from the file name.",
         changed,
-        args.dry_run,
+        args,
     )
     if report:
         result.notes.append(f"report: {report}")
+        result.reports.append(report)
     return finish(result)
 
 
@@ -683,13 +860,13 @@ def process_extract(path: Path, args: argparse.Namespace) -> tuple[str, str | No
     if lrc_content is None:
         return "unsynced_skipped", None
 
-    if not args.dry_run:
+    if args.apply:
         # A write failure is this file's problem only; the step reports it and
         # carries on with the rest of the library.
         try:
             if args.backup and lrc_path.exists():
                 original = lrc_path.read_text(encoding="utf-8", errors="replace")
-                backup_text_file(lrc_path, original)
+                backup_text_file(lrc_path, original, args)
             lrc_path.write_text(lrc_content, encoding="utf-8")
         except OSError as e:
             return "error", str(e)
@@ -750,9 +927,10 @@ def step_extract(args: argparse.Namespace, root: Path) -> StepResult:
         ),
         ("lrc_error_report.txt", "Errors while extracting lyrics.", result.errors),
     ):
-        report = write_report(args.report_dir, filename, header, items, args.dry_run)
+        report = write_report(args.report_dir, filename, header, items, args)
         if report:
             result.notes.append(f"report: {report}")
+            result.reports.append(report)
     return finish(result)
 
 
@@ -763,57 +941,12 @@ def step_extract(args: argparse.Namespace, root: Path) -> StepResult:
 # Normalized role (lowercase, all whitespace removed) -> canonical field name.
 # Curated on purpose: lyric lines that merely contain a colon ("她说：...",
 # "但我们最终归航：...") must never be mistaken for credits, so only these
-# exact role spellings are accepted.
-CREDIT_ROLES: dict[str, str] = {
-    # lyricist
-    "作词": "lyricist", "作詞": "lyricist", "词": "lyricist", "詞": "lyricist",
-    "lyricist": "lyricist", "lyrics": "lyricist", "lyricsby": "lyricist",
-    "shi": "lyricist",  # romaji reading of 詞, used by some LRC sources
-    # composer
-    "作曲": "composer", "曲": "composer", "composer": "composer",
-    "composedby": "composer", "musicby": "composer", "music": "composer",
-    "kyoku": "composer",  # romaji reading of 曲
-    # arranger
-    "编曲": "arranger", "編曲": "arranger", "arranger": "arranger",
-    "arrangedby": "arranger", "管乐编写": "arranger",
-    # producer
-    "制作人": "producer", "制作": "producer", "producer": "producer",
-    "producedby": "producer", "p主": "producer",
-    # mixer / mastering / engineer
-    "混音": "mixer", "mixer": "mixer", "mixedby": "mixer",
-    "母带": "mastering", "masteredby": "mastering",
-    "录音": "engineer", "engineer": "engineer", "recordedby": "engineer",
-    "人声录音": "engineer", "器乐录音": "engineer",
-    "音频编辑": "engineer", "人声工程师": "engineer",
-    # combined writing credit
-    "writtenby": "writer",
-    # performers
-    "人声": "performer", "主唱": "performer", "演唱": "performer", "唱": "performer",
-    "歌手": "performer", "和声": "performer", "vocal": "performer",
-    "vocalist": "performer", "singer": "performer",
-    "原唱": "original_vocalist", "翻唱": "cover_vocalist",
-    # remaining credits
-    "译": "translator", "翻译": "translator",
-    "来源": "source", "翻译取自": "source",
-    "监制": "supervisor", "轴": "subtitle_timing",
-    "封面": "cover_art", "illustration": "cover_art",
-}
+# exact role spellings are accepted.  The list lives in rules/roles.txt.
+CREDIT_ROLES: dict[str, str] = {}
 
 # Normalized Chinese instrument role -> English instrument name.
-INSTRUMENT_ROLES: dict[str, str] = {
-    "吉他": "guitar", "木吉他": "acoustic guitar", "电吉他": "electric guitar",
-    "12弦木吉他": "12-string guitar", "莱雅琴": "lyre",
-    "贝斯": "bass", "提琴贝斯": "double bass", "doublebass": "double bass",
-    "鼓": "drums", "打击乐": "percussion",
-    "钢琴": "piano", "键盘": "keyboard",
-    "小提琴": "violin", "中提琴": "viola", "大提琴": "cello",
-    "长笛": "flute", "低音单簧管": "bass clarinet",
-    "萨克斯": "saxophone", "中音萨克斯": "alto saxophone",
-    "次中音萨克斯": "tenor saxophone", "上低音萨克斯": "baritone saxophone",
-    "小号": "trumpet", "长号": "trombone", "次中音号": "euphonium",
-    "唢呐": "suona", "笛子": "dizi", "古筝": "guzheng", "阮": "ruan",
-    "采样": "sampling", "硬件噪音": "hardware noise",
-}
+# The list lives in rules/instruments.txt.
+INSTRUMENT_ROLES: dict[str, str] = {}
 
 # Canonical field -> standard ID3v2.4 text frame.
 ID3_TEXT_FIELDS = {"lyricist": "TEXT", "composer": "TCOM"}
@@ -827,23 +960,48 @@ CREDIT_ROLE_SPLIT = re.compile(r"[/、,，;；]")
 PERFORMER_PREFIX = "performer:"
 CREDIT_SEPARATORS = ("：", ":")
 
-# LRC header tags dropped because they carry no lyric content and are not
-# needed to match a track to its lyrics: source-site ids, encoding hints and
-# empty stub fields.
+# Every "[name:value]" line is a header tag, and none of them are lyrics: song
+# title, artist, album, length, source-site ids (by/kuwo/ver/hash/sign/qq/
+# total/kana) and the base64 blobs some sites embed ([awlrc:...]/[tlrc:...]).
+# They are all removed, so a .lrc holds nothing but lyrics.
 #
-# ti / ar / al are deliberately KEPT: rmpc indexes lyrics by them and picks an
-# entry from that index, and `length` drives its "closest match by length"
-# tie-break.  Dropping them would degrade lyric matching to filename-only.
-DROPPABLE_LRC_TAGS = {"by", "kuwo", "ver", "hash", "sign", "qq", "total", "kana"}
+# This deliberately drops ti/ar/al/length, which rmpc can index lyrics by.  The
+# trade is intentional: the same lyrics are embedded in the audio file and the
+# file name is normalised to "<title> - <artist>", so matching keeps a path.
+#
+# The value part is ".*" rather than "[^\]]*" because real headers contain
+# brackets -- "[ar:Black onyX [帝アキラ (cv.入野自由)...]]" used to fall through
+# to the "is this a lyric?" branch and made an instrumental look sung.
+LRC_HEADER_RE = re.compile(r"^\[([A-Za-z_][A-Za-z0-9_]*):(.*)\]$")
 
-# [name:value] header tag, and a bracketed prefix of any shape (which also
-# catches credit lines behind a malformed timestamp such as "[00:-1.0]").
-LRC_META_RE = re.compile(r"^\[([A-Za-z_][A-Za-z0-9_]*):([^\]]*)\]$")
+# A bracketed prefix of any shape: catches credit lines behind a malformed
+# timestamp such as "[00:-1.0]作词: X", which TIMESTAMP_RE cannot match.
 BRACKETED_RE = re.compile(r"^\[([^\]]*)\](.*)$")
 
 
 def normalize_role(s: str) -> str:
     return re.sub(r"[\s\u3000]+", "", s).lower()
+
+
+CREDIT_ROLES.update(
+    {normalize_role(k): v for k, v in load_rule_pairs(RULES_DIR / "roles.txt").items()}
+)
+INSTRUMENT_ROLES.update(
+    {normalize_role(k): v for k, v in load_rule_pairs(RULES_DIR / "instruments.txt").items()}
+)
+
+# Source-site legal notices some LRC files carry as a *lyric line*, e.g.
+# "[00:00.45]QQ音乐享有本翻译作品的著作权".  Patterns are deliberately narrow --
+# see rules/notices.txt for the measured false positives of a broad match.
+NOTICE_PATTERNS = load_rule_patterns(RULES_DIR / "notices.txt")
+
+
+def matching_notice(text: str) -> str | None:
+    """Return the pattern that marks this text as a source-site notice."""
+    for pat in NOTICE_PATTERNS:
+        if pat.search(text):
+            return pat.pattern
+    return None
 
 
 def credit_field_for_role(role: str) -> str | None:
@@ -886,14 +1044,19 @@ def _norm_cmp(s: str) -> str:
 
 
 def looks_like_title_line(content: str, artist_names: list[str]) -> bool:
-    """True for a leading "<title> - <artist>" line that duplicates [ti:]/[ar:]."""
+    """True for a leading "<artist> - <title>" / "<title> - <artist>" heading.
+
+    Sources write the per-song heading either way round -- "羽生まゐご - 我愛メイデン"
+    (artist first) and "我愛メイデン - 羽生まゐご" (title first) both occur, and the
+    first spelling used to be kept as a lyric because only the tail was checked.
+    The line counts as a heading when either side is a known artist name.
+    """
     if " - " not in content or len(content) > 200:
         return False
-    tail = _norm_cmp(content.split(" - ", 1)[1])
-    if not tail:
-        return False
+    head_cmp, tail_cmp = (_norm_cmp(part) for part in content.split(" - ", 1))
     return any(
-        len(a) >= 2 and a in tail for a in (_norm_cmp(n) for n in artist_names if n)
+        len(a) >= 2 and (a in head_cmp or a in tail_cmp)
+        for a in (_norm_cmp(n) for n in artist_names if n)
     )
 
 
@@ -1091,11 +1254,19 @@ def find_audio_for_lrc(lrc: Path) -> Path | None:
 
 @dataclass
 class CreditPlan:
-    """What would be moved out of one .lrc file."""
+    """What would be taken out of one .lrc file."""
 
     credits: dict[str, list[str]] = field(default_factory=dict)
     remove_idx: set[int] = field(default_factory=set)
     removed_preview: list[str] = field(default_factory=list)
+
+    def remove(self, idx: int, line: str, reason: str) -> None:
+        self.remove_idx.add(idx)
+        self.removed_preview.append(f"{line}   ({reason})")
+
+    def note_credit(self, fields: list[str], value: str) -> None:
+        for name in fields:
+            self.credits.setdefault(name, []).append(value)
 
     def resolved(self) -> dict[str, str]:
         """Collapse accumulated values per field, de-duplicated and joined."""
@@ -1107,12 +1278,28 @@ class CreditPlan:
         return out
 
 
-def plan_credit_extraction(lines: list[str], artist_names: list[str]) -> CreditPlan:
-    """Decide which lines carry author info or non-lyric metadata.
+def plan_credit_extraction(
+    lines: list[str],
+    artist_names: list[str],
+    forced_instrumental: bool = False,
+) -> CreditPlan:
+    """Decide what to take out of one .lrc: everything that is not a lyric.
 
-    Runs over the whole file, not just the timed body: credits can hide in the
-    header region behind a malformed timestamp ("[00:-1.0]作词: X"), which a
-    body-only scan never sees because TIMESTAMP_RE cannot match it.
+    Four kinds of line go:
+
+    * **header tags** -- every ``[name:value]`` line: ti/ar/al/length, the
+      source-site ids (by/kuwo/ver/hash/sign/qq/total/kana) and the base64 blobs
+      some sites embed as ``[awlrc:...]`` / ``[tlrc:...]``;
+    * **credits** -- ``作词：X``, ``Guitars: Y``, a leading ``<title> - <artist>``
+      line; with a timestamp or without, and also behind a malformed timestamp
+      such as ``[00:-1.0]`` that TIMESTAMP_RE cannot match;
+    * **source-site notices** -- matched against ``rules/notices.txt``;
+    * the ``//`` separator some sources emit.
+
+    Everything else is kept, including blank lines and -- deliberately -- text
+    lines with no timestamp: those are the translation/romaji continuations the
+    ``bilingual`` step is about to give a timestamp to.  When in doubt the line
+    stays, and nothing is dropped without appearing in the report.
     """
     plan = CreditPlan()
     # Title lines only appear in the leading block, and a source may carry
@@ -1123,78 +1310,72 @@ def plan_credit_extraction(lines: list[str], artist_names: list[str]) -> CreditP
     for idx, line in enumerate(lines):
         s = line.strip()
         if not s:
-            continue
+            continue  # blank line: kept, and it does not break the run of lyrics
 
         m = TIMESTAMP_RE.match(s)
-        if not m:
-            # Header region: either a droppable metadata tag, or a credit line
-            # whose timestamp is malformed and so never matched above.
-            meta = LRC_META_RE.match(s)
-            if meta:
-                tag, value = meta.group(1).lower(), meta.group(2).strip()
-                if tag in DROPPABLE_LRC_TAGS or (tag == "offset" and value in ("", "0")):
-                    plan.removed_preview.append(f"{s}   (metadata tag)")
-                    plan.remove_idx.add(idx)
-                continue
+        content = s[m.end():].strip() if m else s
 
+        if m is None:
+            if LRC_HEADER_RE.match(s):
+                plan.remove(idx, line, "header tag")
+                continue
             bracketed = BRACKETED_RE.match(s)
             if bracketed:
                 rest = bracketed.group(2).strip()
                 parsed = parse_credit_line(rest) if rest else None
                 if parsed is not None:
-                    fields, value = parsed
-                    for f in fields:
-                        plan.credits.setdefault(f, []).append(value)
-                    plan.removed_preview.append(
-                        f"{s}   -> {', '.join(fields)} (malformed timestamp)"
-                    )
-                    plan.remove_idx.add(idx)
+                    plan.note_credit(*parsed)
+                    plan.remove(idx, line, "credit behind a malformed timestamp")
+                continue
+        elif content in ("//", "/"):
+            plan.remove(idx, line, "separator")
             continue
 
-        content = s[m.end():].strip()
+        if forced_instrumental:
+            # A human declared this file instrumental (manual/instrumental.txt):
+            # keep whatever credit is still recognisable, drop the rest.
+            parsed = parse_credit_line(content) if content else None
+            if parsed is not None:
+                plan.note_credit(*parsed)
+            plan.remove(idx, line, "declared instrumental")
+            continue
 
-        # "//" is a separator some sources emit between label lines.  It is
-        # never lyrics, so it always goes.
-        if content in ("//", "/"):
-            plan.removed_preview.append(f"{s}   (separator)")
-            plan.remove_idx.add(idx)
+        if not content:
+            continue  # "[00:12.00]" with nothing after it: a display blank, kept
+
+        notice = matching_notice(content)
+        if notice:
+            plan.remove(idx, line, f"source-site notice  /{notice}/")
             continue
 
         parsed = parse_credit_line(content)
-        is_title = (
-            in_leading_block
-            and m.group(1).startswith("00:00")
-            and looks_like_title_line(content, artist_names)
+        is_title = in_leading_block and looks_like_title_line(content, artist_names) and (
+            m is None or m.group(1).startswith("00:00")
         )
         if parsed is None and not is_title:
-            in_leading_block = False  # first real lyric ends the leading block
+            in_leading_block = False  # first real lyric line ends the heading block
             continue
 
         if is_title:
-            plan.removed_preview.append(f"{s}   (title line)")
+            plan.remove(idx, line, "title line")
         else:
-            fields, value = parsed  # type: ignore[misc]
-            for f in fields:
-                plan.credits.setdefault(f, []).append(value)
-            plan.removed_preview.append(f"{s}   -> {', '.join(fields)}")
-        plan.remove_idx.add(idx)
-
+            plan.note_credit(*parsed)  # type: ignore[misc]
+            plan.remove(idx, line, "credit")
     return plan
 
 
-def step_credits(args: argparse.Namespace, root: Path) -> StepResult:
+def step_clean(args: argparse.Namespace, root: Path) -> StepResult:
+    """Leave nothing in a .lrc but lyrics; move author info into audio tags."""
     files = lrc_files(root)
     print(f"  Found {len(files)} .lrc files under {root}")
+    if MANUAL_INSTRUMENTAL:
+        print(f"  Declared instrumental (manual/instrumental.txt): {len(MANUAL_INSTRUMENTAL)}")
 
     result = StepResult(
-        "credits",
-        counts={
-            "moved": 0,
-            "skipped_no_credits": 0,
-            "skipped_no_audio": 0,
-            "error": 0,
-        },
+        "clean",
+        counts={"cleaned": 0, "skipped_clean": 0, "skipped_no_audio": 0, "error": 0},
     )
+    removed_log: list[str] = []
     move_log: list[str] = []
 
     for i, lrc in enumerate(files, 1):
@@ -1215,7 +1396,8 @@ def step_credits(args: argparse.Namespace, root: Path) -> StepResult:
             continue
 
         # Drop a BOM so the first header tag is recognised like any other.
-        if text.startswith("\ufeff"):
+        had_bom = text.startswith("\ufeff")
+        if had_bom:
             text = text[1:]
         lines = text.splitlines()
 
@@ -1227,23 +1409,33 @@ def step_credits(args: argparse.Namespace, root: Path) -> StepResult:
             if m:
                 artist_names.extend(a.strip() for a in re.split(r"[;,/、]", m.group(1)))
 
-        plan = plan_credit_extraction(lines, artist_names)
+        plan = plan_credit_extraction(
+            lines, artist_names, forced_instrumental=lrc.name in MANUAL_INSTRUMENTAL
+        )
         resolved = plan.resolved()
-        if not resolved and not plan.remove_idx:
-            result.counts["skipped_no_credits"] += 1
+        if not plan.remove_idx and not had_bom:
+            result.counts["skipped_clean"] += 1
             continue
 
-        if args.dry_run:
-            print(f"    WOULD MOVE: {lrc.name}")
-            for line in plan.removed_preview[:DRY_RUN_PREVIEW_LINES]:
-                print(f"        - {line}")
-            extra = len(plan.removed_preview) - DRY_RUN_PREVIEW_LINES
-            if extra > 0:
-                print(f"        ... (+{extra} more lines)")
-            result.counts["moved"] += 1
+        if plan.remove_idx:
+            removed_log.append(f"--- {lrc.name}")
+            removed_log.extend(f"    - {entry}" for entry in plan.removed_preview)
+            result.counts["lines_removed"] = (
+                result.counts.get("lines_removed", 0) + len(plan.remove_idx)
+            )
+
+        if not args.apply:
+            if plan.remove_idx:
+                print(f"    WOULD CLEAN: {lrc.name}")
+                for entry in plan.removed_preview[:DRY_RUN_PREVIEW_LINES]:
+                    print(f"        - {entry}")
+                extra = len(plan.removed_preview) - DRY_RUN_PREVIEW_LINES
+                if extra > 0:
+                    print(f"        ... (+{extra} more lines)")
+            result.counts["cleaned"] += 1
             continue
 
-        # Write tags FIRST; only strip the .lrc once that succeeded.
+        # Write the tags FIRST; only strip the .lrc once that succeeded.
         if resolved:
             try:
                 change_lines = write_credits_to_audio(audio, resolved)
@@ -1254,44 +1446,52 @@ def step_credits(args: argparse.Namespace, root: Path) -> StepResult:
             move_log.append(f"{lrc.name}  ->  {audio.name}")
             move_log.extend(change_lines)
 
-        if plan.remove_idx:
+        if plan.remove_idx or had_bom:
             kept = [ln for idx, ln in enumerate(lines) if idx not in plan.remove_idx]
             new_text = "\n".join(kept)
             if text.endswith("\n"):
                 new_text += "\n"
-            # The tags are already written, so a failure here only means the
-            # credit lines stay in the .lrc (duplicated, nothing lost).
+            # Tags are already written, so a failure here only means the removed
+            # lines stay in the .lrc (duplicated, nothing lost).
             try:
                 if args.backup:
-                    backup_text_file(lrc, text)
+                    backup_text_file(lrc, text, args)
                 lrc.write_text(new_text, encoding="utf-8")
             except OSError as e:
                 result.counts["error"] += 1
                 result.errors.append(f"{lrc}: cannot write: {e}")
                 continue
 
-        result.counts["moved"] += 1
+        result.counts["cleaned"] += 1
 
     report_summary(
         result.counts,
         [
-            ("moved", "Files processed:"),
-            ("skipped_no_credits", "Skipped (no credits found):"),
+            ("cleaned", "Cleaned:"),
+            ("lines_removed", "Lines removed:"),
+            ("skipped_clean", "Skipped (nothing to remove):"),
             ("skipped_no_audio", "Skipped (no matching audio):"),
             ("error", "Errors:"),
         ],
     )
-    if move_log:
-        report = write_report(
-            args.report_dir,
-            "credits_moved_report.txt",
+    for filename, header, items in (
+        (
+            "clean_removed_report.txt",
+            "Every line removed from a .lrc, with the reason.  '--- <file>' starts "
+            "each file's list.",
+            removed_log,
+        ),
+        (
+            "clean_tags_report.txt",
             "Author info moved from .lrc into audio tags. '[+]' added, "
             "'[~]' overwritten, '[=]' unchanged; 'old -> new' shows what was replaced.",
             move_log,
-            args.dry_run,
-        )
+        ),
+    ):
+        report = write_report(args.report_dir, filename, header, items, args)
         if report:
             result.notes.append(f"report: {report}")
+            result.reports.append(report)
     return finish(result)
 
 
@@ -1322,9 +1522,14 @@ def is_placeholder(content: str) -> bool:
 
 
 def is_metadata_line(line: str) -> bool:
-    """True for lines like [ti:...], [ar:...], [by:...], [offset:...]."""
-    s = line.strip()
-    return bool(re.match(r"^\[[^\[\]]+\][^\[\]]*$", s)) and ":" in s.split("]", 1)[0]
+    """True for a header tag line such as [ti:...], [ar:...], [by:...].
+
+    Uses the same permissive pattern as the cleaner: a header value may itself
+    contain brackets ("[ar:Black onyX [帝アキラ (cv.入野自由)・...]]"), and such a
+    line used to fall through to the "is this a lyric?" branch and make an
+    instrumental look sung.
+    """
+    return bool(LRC_HEADER_RE.match(line.strip()))
 
 
 def has_real_lyrics_in_text(text: str) -> bool:
@@ -1362,45 +1567,17 @@ def has_real_lyrics_in_text(text: str) -> bool:
     return False
 
 
-def existing_lrc_header(text: str) -> dict[str, str]:
-    """Read the [ti:]/[ar:]/[al:] values already present in a .lrc file."""
-    if text.startswith("\ufeff"):
-        text = text[1:]
-    out: dict[str, str] = {}
-    for line in text.splitlines():
-        m = LRC_META_RE.match(line.strip())
-        if m and m.group(1).lower() in {"ti", "ar", "al"}:
-            value = m.group(2).strip()
-            if value:
-                out.setdefault(m.group(1).lower(), value)
-    return out
+NO_LYRICS_LINE = "[00:00.00]No lyrics"
 
 
-def build_no_lyrics_lrc(
-    artist: str | None,
-    title: str | None,
-    album: str | None,
-    length: float | None,
-    fallback: dict[str, str] | None = None,
-) -> str:
-    # Audio metadata wins; a header the .lrc already carried is kept rather than
-    # thrown away when the audio file has no such tag.
-    fallback = fallback or {}
-    title = title or fallback.get("ti")
-    artist = artist or fallback.get("ar")
-    album = album or fallback.get("al")
+def build_no_lyrics_lrc() -> str:
+    """The only content a lyric-less .lrc may carry.
 
-    header: list[str] = []
-    if title:
-        header.append(f"[ti:{title}]")
-    if artist:
-        header.append(f"[ar:{artist}]")
-    if album:
-        header.append(f"[al:{album}]")
-    if length:
-        header.append(f"[length:{sec_to_lrc_len(length)}]")
-    header.append("[00:00.00]No lyrics")
-    return "\n".join(header) + "\n"
+    One line and nothing else -- no [ti:]/[ar:]/[al:]/[length:] header, because
+    a .lrc holds lyrics and nothing but lyrics.  The title/artist/album live in
+    the audio file's tags and in its name.
+    """
+    return NO_LYRICS_LINE + "\n"
 
 
 def extract_embedded_text(path: Path) -> str | None:
@@ -1443,6 +1620,7 @@ def extract_embedded_text(path: Path) -> str | None:
 
 def process_no_lyrics(path: Path, args: argparse.Namespace) -> str:
     lrc_path = path.with_suffix(".lrc")
+    declared = lrc_path.name in MANUAL_INSTRUMENTAL
 
     if lrc_path.exists():
         try:
@@ -1450,37 +1628,37 @@ def process_no_lyrics(path: Path, args: argparse.Namespace) -> str:
         except OSError as e:
             return f"error: {e}"
 
-        if has_real_lyrics_in_text(existing):
+        # A file declared instrumental is "no lyrics" by definition; otherwise
+        # ask whether anything left in it is a real lyric.
+        if not declared and has_real_lyrics_in_text(existing):
             return "skipped_has_lyrics"
 
-        # No real lyrics -> rewrite uniformly.
-        artist, title, album, length = get_metadata(path)
-        new_content = build_no_lyrics_lrc(
-            artist, title, album, length, existing_lrc_header(existing)
-        )
+        new_content = build_no_lyrics_lrc()
         if existing == new_content:
             return "skipped_no_change"
-        if not args.dry_run:
-            try:
-                if args.backup:
-                    backup_text_file(lrc_path, existing)
-                lrc_path.write_text(new_content, encoding="utf-8")
-            except OSError as e:
-                return f"error: {e}"
-        return "written"
-
-    # No .lrc file.  Check embedded lyrics so real lyrics are not marked none.
-    embedded = extract_embedded_text(path)
-    if embedded and has_real_lyrics_in_text(embedded):
-        return "skipped_has_lyrics"
-
-    artist, title, album, length = get_metadata(path)
-    new_content = build_no_lyrics_lrc(artist, title, album, length)
-    if not args.dry_run:
+        if not args.apply:
+            return "written"
         try:
+            if args.backup:
+                backup_text_file(lrc_path, existing, args)
             lrc_path.write_text(new_content, encoding="utf-8")
         except OSError as e:
             return f"error: {e}"
+        return "written"
+
+    # No .lrc file.  Check embedded lyrics so real lyrics are not marked none.
+    if not declared:
+        embedded = extract_embedded_text(path)
+        if embedded and has_real_lyrics_in_text(embedded):
+            return "skipped_has_lyrics"
+
+    new_content = build_no_lyrics_lrc()
+    if not args.apply:
+        return "written"
+    try:
+        lrc_path.write_text(new_content, encoding="utf-8")
+    except OSError as e:
+        return f"error: {e}"
     return "written"
 
 
@@ -1546,6 +1724,7 @@ def bilingual_process_lrc(text: str, max_lines: int | None) -> tuple[str | None,
         # a bare [MM:SS] to [MM:SS.00].
         lambda group: f"[{pad_bare_timestamp(group[0][0])}]",
         max_lines=max_lines,
+        adopt=True,
     )
     if not new_body:
         return None, dropped
@@ -1597,7 +1776,7 @@ def step_bilingual(args: argparse.Namespace, root: Path) -> StepResult:
             result.counts["skipped"] += 1
             continue
 
-        if args.dry_run:
+        if not args.apply:
             print(f"    WOULD UPDATE: {path}")
             result.counts["written"] += 1
             continue
@@ -1605,7 +1784,7 @@ def step_bilingual(args: argparse.Namespace, root: Path) -> StepResult:
         # One unwritable file must not abort the remaining files or steps.
         try:
             if args.backup:
-                backup_text_file(path, original)
+                backup_text_file(path, original, args)
             path.write_text(new_text, encoding="utf-8")
         except OSError as e:
             result.counts["error"] += 1
@@ -1679,6 +1858,7 @@ def romaji_process_lrc(text: str) -> str | None:
         parse_lrc_line,
         lambda group: group[0][0],  # already a normalized [MM:SS.ff]
         reorder=reorder_group,
+        adopt=True,
     )
 
     if not reordered:
@@ -1705,7 +1885,7 @@ def step_romaji(args: argparse.Namespace, root: Path) -> StepResult:
             result.counts["skipped"] += 1
             continue
 
-        if args.dry_run:
+        if not args.apply:
             print(f"    WOULD UPDATE: {path}")
             result.counts["written"] += 1
             continue
@@ -1713,7 +1893,7 @@ def step_romaji(args: argparse.Namespace, root: Path) -> StepResult:
         # One unwritable file must not abort the remaining files or steps.
         try:
             if args.backup:
-                backup_text_file(path, original)
+                backup_text_file(path, original, args)
             path.write_text(new_text, encoding="utf-8")
         except OSError as e:
             result.counts["error"] += 1
@@ -1799,8 +1979,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Comma-separated steps to run, or 'all' (default: %(default)s). "
         f"Choices: all, {', '.join(STEP_ORDER)}",
     )
-    parser.add_argument("--dry-run", action="store_true", help="Show what would change without writing")
-    parser.add_argument("--backup", action="store_true", help="Keep a .bak copy before overwriting anything")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would change and write nothing at all -- no library "
+        "change, no report file, no backup",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Do not ask before each step (for non-interactive runs).  Reports "
+        "and backups are still written",
+    )
+    parser.add_argument(
+        "--backup",
+        action="store_true",
+        help=f"Back up before changing anything: .lrc files in full, audio files "
+        f"as a tag dump, under {DEFAULT_BACKUP_DIR}/<timestamp>/",
+    )
     parser.add_argument(
         "--report-dir",
         default=str(DEFAULT_REPORT_DIR),
@@ -1839,11 +2035,54 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 RUNNERS = {
     "ogg": step_ogg,
     "extract": step_extract,
-    "credits": step_credits,
+    "clean": step_clean,
     "nolyrics": step_no_lyrics,
     "bilingual": step_bilingual,
     "romaji": step_romaji,
 }
+
+
+STEP_PROMPT_HELP = "[Enter] 看报告   [y] 执行   [s] 跳过本步   [q] 退出"
+STEP_PROMPT_ANSWERS = {"y": "apply", "yes": "apply", "s": "skip", "n": "skip", "q": "quit"}
+
+
+def show_report(path: Path) -> None:
+    """Print the head of a report on Enter, leaving the file on disk for the rest."""
+    lines = [f"  --- {path} ---"]
+    try:
+        lines.extend(Path(path).read_text(encoding="utf-8").splitlines())
+    except OSError as e:
+        print(f"  (cannot read {path}: {e})")
+        return
+    for line in lines[:REPORT_PREVIEW_LINES]:
+        print(line if line.startswith("  ") else f"  {line}")
+    if len(lines) > REPORT_PREVIEW_LINES:
+        print(f"  ... ({len(lines)} lines in total; the full list is in {path})")
+
+
+def ask_step(name: str, result: StepResult) -> str:
+    """Ask whether to apply one step.  Returns 'apply' | 'skip' | 'quit'.
+
+    The step has already run in plan mode, so its report is on disk: Enter shows
+    the head of it and asks again, which is what makes the decision informed
+    rather than a rubber stamp on a summary.
+    """
+    while True:
+        try:
+            answer = input(f"  [{name}] {STEP_PROMPT_HELP} > ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return "quit"
+        if answer in STEP_PROMPT_ANSWERS:
+            return STEP_PROMPT_ANSWERS[answer]
+        if answer == "":
+            if result.reports:
+                for path in result.reports:
+                    show_report(path)
+            else:
+                print("  (this step produced no report)")
+            continue
+        print(f"  Please answer Enter / y / s / q.")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1854,27 +2093,84 @@ def main(argv: list[str] | None = None) -> int:
     if not root.is_dir():
         print(f"Error: not a directory: {root}", file=sys.stderr)
         return 2
-    args.report_dir = Path(args.report_dir).expanduser().resolve()
+    args.music_root = root
+
+    interactive = sys.stdin.isatty()
+    if not args.dry_run and not args.yes and not interactive:
+        print(
+            "Refusing to run: stdin is not a terminal, so no step could be "
+            "confirmed.  Run it in a terminal, or pass --yes to apply without "
+            "asking, or --dry-run to only look.",
+            file=sys.stderr,
+        )
+        return 2
+
+    # One directory per run, so a re-run never lands on top of the previous
+    # run's reports or backups.  Two runs can start within the same second (a
+    # test suite, a quick retry), so keep bumping the suffix until it is free.
+    report_parent = Path(args.report_dir).expanduser().resolve()
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    run_id, suffix = stamp, 2
+    while (report_parent / run_id).exists():
+        run_id, suffix = f"{stamp}-{suffix}", suffix + 1
+    args.report_dir = report_parent / run_id
+    args.backup_dir = DEFAULT_BACKUP_DIR / run_id
+    args.write_reports = not args.dry_run
+    args.apply = False  # flipped per step, once the step is confirmed
 
     print("=" * 60)
     print(f" Music library: {root}")
     print(f" Steps:         {', '.join(steps)}")
-    print(f" Dry-run:       {'yes' if args.dry_run else 'no'}")
-    print(f" Backup:        {'yes' if args.backup else 'no'}")
-    print(f" Reports:       {args.report_dir}")
+    print(f" Mode:          {'dry-run (nothing is written)' if args.dry_run else ('apply, no questions' if args.yes else 'interactive')}")
+    print(f" Backup:        {'yes -> ' + str(args.backup_dir) if args.backup else 'no'}")
+    print(f" Reports:       {args.report_dir if args.write_reports else '(dry-run: none written)'}")
     print("=" * 60)
 
     failures = 0
     aborted_in: str | None = None
+    stopped_by_user = False
+
     for name in steps:
         print(f"\n=====> [{name}]")
+
+        # Interactive runs plan first: the step writes its report and changes
+        # nothing, so the report is on disk by the time you are asked.  A
+        # --dry-run run stops there; a --yes run goes straight to applying,
+        # because there is nobody to ask and the report is written either way.
+        if not args.yes:
+            args.apply = False
+            try:
+                planned = RUNNERS[name](args, root)
+            except Exception as e:  # noqa: BLE001 - a failed step must stop the run
+                print(f"  STEP FAILED: {e}", file=sys.stderr)
+                failures += 1
+                aborted_in = name
+                break
+            if planned.errors:
+                failures += 1
+
+            if args.dry_run:
+                continue
+
+            decision = ask_step(name, planned)
+            if decision == "quit":
+                stopped_by_user = True
+                break
+            if decision == "skip":
+                print(f"  [{name}] skipped.")
+                continue
+
+        # Apply, re-deriving the plan file by file as it goes.
+        args.apply = True
         try:
             result = RUNNERS[name](args, root)
-        except Exception as e:  # noqa: BLE001 - a failed step must stop the run
+        except Exception as e:  # noqa: BLE001
             print(f"  STEP FAILED: {e}", file=sys.stderr)
             failures += 1
+            args.apply = False
             aborted_in = name
             break
+        args.apply = False
         if result.errors:
             failures += 1
 
@@ -1888,6 +2184,10 @@ def main(argv: list[str] | None = None) -> int:
     print("\n" + "=" * 60)
     if aborted_in:
         print(f" Run aborted in step '{aborted_in}'; later steps were not run.")
+        print("=" * 60)
+        return 1
+    if stopped_by_user:
+        print(" Stopped at your request; later steps were not run.")
         print("=" * 60)
         return 1
     if failures:
