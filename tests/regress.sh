@@ -157,7 +157,7 @@ check "credit in tag"      "$(python3 -c "
 from mutagen.id3 import ID3; print(ID3('$R/t10/e.mp3').getall('TEXT')[0].text[0])")" "Someone"
 check "lyrics kept"        "$(grep -c '^\[00:10.00\]Real line$' "$R/t10/e.lrc")" "1"
 check "last line kept"     "$(grep -c '^\[00:16.00\]Last line$' "$R/t10/e.lrc")" "1"
-check "blank line kept"    "$(grep -c '^$' "$R/t10/e.lrc")" "1"
+check "bare blank removed"  "$(grep -c '^$' "$R/t10/e.lrc")" "0"
 check "timed blank kept"   "$(grep -c '^\[00:12.00\]$' "$R/t10/e.lrc")" "1"
 
 echo "== T11 a blank line does not break the continuation chain =="

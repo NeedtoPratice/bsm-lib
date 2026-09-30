@@ -45,10 +45,13 @@ for lrc in lrcs:
     if text == M.build_no_lyrics_lrc():
         continue  # a lyric-less file, in its finished shape
 
-    for line in text.splitlines():
+    for number, line in enumerate(text.splitlines(), 1):
         s = line.strip()
         if not s:
-            continue  # blank lines are kept as they are
+            # A line with no timestamp says nothing; only a timestamped blank
+            # ("[00:12.00]") is meaningful, and that one has content == "".
+            bad("blank line without a timestamp", f"{lrc.name}:{number}")
+            continue
         if M.LRC_HEADER_RE.match(s):
             bad("header tag left", f"{lrc.name}: {s[:40]}")
             continue

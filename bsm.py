@@ -1325,10 +1325,11 @@ def plan_credit_extraction(
     * **source-site notices** -- matched against ``rules/notices.txt``;
     * the ``//`` separator some sources emit.
 
-    Everything else is kept, including blank lines and -- deliberately -- text
-    lines with no timestamp: those are the translation/romaji continuations the
-    ``bilingual`` step is about to give a timestamp to.  When in doubt the line
-    stays, and nothing is dropped without appearing in the report.
+    Everything else is kept, including timestamped blank lines and --
+    deliberately -- text lines with no timestamp: those are the
+    translation/romaji continuations the ``bilingual`` step is about to give a
+    timestamp to.  When in doubt the line stays, and nothing is dropped without
+    appearing in the report.
     """
     plan = CreditPlan()
     # Title lines only appear in the leading block, and a source may carry
@@ -1339,7 +1340,12 @@ def plan_credit_extraction(
     for idx, line in enumerate(lines):
         s = line.strip()
         if not s:
-            continue  # blank line: kept, and it does not break the run of lyrics
+            # A line with no timestamp cannot tell a player anything, so it is
+            # noise.  A *timestamped* blank ("[00:12.00]" with nothing after it)
+            # is a different thing -- it is a display instruction meaning "clear
+            # the screen here" -- and the branch below keeps it.
+            plan.remove(idx, line, "blank line (no timestamp)")
+            continue
 
         m = TIMESTAMP_RE.match(s)
         content = s[m.end():].strip() if m else s
