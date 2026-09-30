@@ -1693,7 +1693,9 @@ def step_no_lyrics(args: argparse.Namespace, root: Path) -> StepResult:
         else:
             result.counts[status] = result.counts.get(status, 0) + 1
             if status == "written":
-                written_log.append(f"{path.name}.lrc")
+                written_log.append(path.with_suffix(".lrc").name)
+                if not args.apply:
+                    print(f"    WOULD WRITE: {path.with_suffix('.lrc').name}")
         if i % 100 == 0 or i == len(files):
             print(f"    ...{i}/{len(files)} processed")
 
@@ -1812,7 +1814,11 @@ def step_bilingual(args: argparse.Namespace, root: Path) -> StepResult:
             changed_log.append(f"--- {path.name}   (lines regrouped)")
 
         if not args.apply:
-            print(f"    WOULD UPDATE: {path}")
+            print(f"    WOULD UPDATE: {path.name}")
+            for line in gained[:DRY_RUN_PREVIEW_LINES]:
+                print(f"        + {line}")
+            if len(gained) > DRY_RUN_PREVIEW_LINES:
+                print(f"        ... (+{len(gained) - DRY_RUN_PREVIEW_LINES} more lines)")
             result.counts["written"] += 1
             continue
 
@@ -1933,15 +1939,20 @@ def step_romaji(args: argparse.Namespace, root: Path) -> StepResult:
             continue
 
         before_set = {line.strip() for line in original.splitlines()}
-        changed_log.append(f"--- {path.name}")
-        changed_log.extend(
-            f"    {line}"
+        moved = [
+            line
             for line in new_text.splitlines()
             if line.strip() and line.strip() not in before_set
-        )
+        ]
+        changed_log.append(f"--- {path.name}")
+        changed_log.extend(f"    {line}" for line in moved)
 
         if not args.apply:
-            print(f"    WOULD UPDATE: {path}")
+            print(f"    WOULD UPDATE: {path.name}")
+            for line in moved[:DRY_RUN_PREVIEW_LINES]:
+                print(f"        {line}")
+            if len(moved) > DRY_RUN_PREVIEW_LINES:
+                print(f"        ... (+{len(moved) - DRY_RUN_PREVIEW_LINES} more lines)")
             result.counts["written"] += 1
             continue
 
