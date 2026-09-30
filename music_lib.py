@@ -2466,6 +2466,29 @@ def step_rename(args: argparse.Namespace, root: Path) -> StepResult:
     return finish(result)
 
 
+def check_embedded_matches(root: Path) -> list[str]:
+    """Audio files whose embedded lyrics no longer match their .lrc.
+
+    The steps depend on each other *across runs*: changing a .lrc without
+    running ``embed`` afterwards leaves the audio carrying the previous
+    version.  That is easy to do by accident -- running ``--steps clean`` to fix
+    one thing is enough -- and invisible unless something looks.
+    """
+    drift: list[str] = []
+    for lrc in lrc_files(root):
+        audio = find_audio_for_lrc(lrc)
+        if audio is None:
+            continue
+        try:
+            text = lrc.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        current = extract_embedded_text(audio)
+        if current is None or current.strip() != text.strip():
+            drift.append(audio.name)
+    return drift
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -2713,6 +2736,20 @@ def main(argv: list[str] | None = None) -> int:
         print("\n=====> Refresh MPD database (skipped: --no-refresh)")
     elif not refresh_mpd():
         failures += 1
+
+    # The audio and the .lrc can drift apart when only some steps are run, so
+    # say so at the end rather than leaving it to be discovered later.
+    if not args.dry_run and not aborted_in and not stopped_by_user:
+        drift = check_embedded_matches(root)
+        if drift:
+            print(
+                f"\n  Note: {len(drift)} audio file(s) carry lyrics that differ from "
+                "their .lrc -- the audio is out of date.  Run --steps embed."
+            )
+            for name in drift[:5]:
+                print(f"    {name}")
+            if len(drift) > 5:
+                print(f"    ... and {len(drift) - 5} more")
 
     print("\n" + "=" * 60)
     if aborted_in:

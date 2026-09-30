@@ -293,6 +293,17 @@ check "newline added" "$(python3 -c "print(open('$R/t21/h.lrc','rb').read().ends
 run "$R/t21" --steps clean --report-dir "$R/reports"
 check "then idempotent" "$(python3 -c "d=open('$R/t21/h.lrc','rb').read(); print(d.count(b'\n'))")" "1"
 
+echo "== T22 a run says when the audio drifted from the .lrc =="
+mkdir -p "$R/t22"; sine libmp3lame "$R/t22/drift.mp3"
+python3 -c "
+from mutagen.id3 import ID3, USLT
+t=ID3(); t.add(USLT(encoding=3, lang='eng', desc='', text='[00:01.00]old lyrics')); t.save('$R/t22/drift.mp3')"
+printf '[00:01.00]new lyrics\n' > "$R/t22/drift.lrc"
+$ML "$R/t22" --steps nolyrics $FLAGS --report-dir "$R/reports" > "$R/t22.log" 2>&1
+check "drift reported" "$(grep -c 'the audio is out of date' "$R/t22.log")" "1"
+$ML "$R/t22" --steps embed $FLAGS --report-dir "$R/reports" > "$R/t22b.log" 2>&1
+check "after embed, quiet" "$(grep -c 'out of date' "$R/t22b.log")" "0"
+
 echo "== T18 the silent steps now write reports =="
 for name in nolyrics_report.txt bilingual_report.txt romaji_report.txt tags_report.txt embed_report.txt rename_report.txt; do
     check "report $name" "$(find "$R/reports" -name "$name" | head -1 | grep -c . )" "1"
