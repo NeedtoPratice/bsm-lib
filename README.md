@@ -1,4 +1,4 @@
-# musicManage
+# Blarney Stone Music Lib
 
 MPD / rmpc 曲库的规范化与维护工具。它把一套明确的歌词与标签格式写成规则，批量套用到
 整个曲库；每一步先把完整改动清单落盘，再问你要不要执行。

@@ -71,7 +71,7 @@ except ImportError as _e:  # pragma: no cover - environment guard
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_MUSIC_DIR = str(Path.home() / "Music")
-# Everything this tool generates stays inside musicManage/: review reports here,
+# Everything this tool generates stays inside its own directory: reports here,
 # backups under backups/<timestamp>/ (see README.md).
 DEFAULT_REPORT_DIR = SCRIPT_DIR / "reports"
 DEFAULT_BACKUP_DIR = SCRIPT_DIR / "backups"
@@ -515,7 +515,7 @@ class StepResult:
 
 
 def backup_dir_for(args: argparse.Namespace, path: Path) -> Path:
-    """Where this file's backup goes: musicManage/backups/<run>/, tree mirrored."""
+    """Where this file's backup goes: <repo>/backups/<run>/, tree mirrored."""
     try:
         rel = path.resolve().relative_to(args.music_root)
     except ValueError:
@@ -526,7 +526,7 @@ def backup_dir_for(args: argparse.Namespace, path: Path) -> Path:
 def backup_text_file(path: Path, original: str, args: argparse.Namespace) -> Path | None:
     """Keep this run's copy of a text file, as it looked before the run started.
 
-    Backups live under musicManage/backups/<timestamp>/ and mirror the library
+    Backups live under backups/<timestamp>/ and mirror the library
     tree, instead of piling .bak files up next to the music.  The first backup of
     a run wins, so a file touched by several steps still has its pre-run content.
     """
