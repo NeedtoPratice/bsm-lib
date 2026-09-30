@@ -1420,7 +1420,10 @@ def step_clean(args: argparse.Namespace, root: Path) -> StepResult:
             lines, artist_names, forced_instrumental=lrc.name in MANUAL_INSTRUMENTAL
         )
         resolved = plan.resolved()
-        if not plan.remove_idx and not had_bom:
+        # A few files came from their sources without a final newline; every
+        # other .lrc has one, so this is part of what "clean" normalises.
+        needs_newline = bool(text.strip()) and not text.endswith("\n")
+        if not plan.remove_idx and not had_bom and not needs_newline:
             result.counts["skipped_clean"] += 1
             continue
 
@@ -1453,11 +1456,13 @@ def step_clean(args: argparse.Namespace, root: Path) -> StepResult:
             move_log.append(f"{lrc.name}  ->  {audio.name}")
             move_log.extend(change_lines)
 
-        if plan.remove_idx or had_bom:
+        if plan.remove_idx or had_bom or needs_newline:
             kept = [ln for idx, ln in enumerate(lines) if idx not in plan.remove_idx]
             new_text = "\n".join(kept)
-            if text.endswith("\n"):
+            if text.endswith("\n") or needs_newline:
                 new_text += "\n"
+            if needs_newline:
+                result.counts["newline_fixed"] = result.counts.get("newline_fixed", 0) + 1
             # Tags are already written, so a failure here only means the removed
             # lines stay in the .lrc (duplicated, nothing lost).
             try:
@@ -1476,6 +1481,7 @@ def step_clean(args: argparse.Namespace, root: Path) -> StepResult:
         [
             ("cleaned", "Cleaned:"),
             ("lines_removed", "Lines removed:"),
+            ("newline_fixed", "Final newline added:"),
             ("skipped_clean", "Skipped (nothing to remove):"),
             ("skipped_no_audio", "Skipped (no matching audio):"),
             ("error", "Errors:"),
@@ -2104,7 +2110,9 @@ def desired_name_fields(path: Path) -> tuple[str, str, list[str]]:
         title = fn_title
         notes.append(f"title from the file name: {fn_title!r}")
 
-    artist = normalize_artist(fn_artist) if fn_artist else tag_artist
+    # Normalise either way: a tag that lists several artists with ", "
+    # must come out with ";" too, not only when the name carried the list.
+    artist = normalize_artist(fn_artist or tag_artist)
 
     title, gloss = strip_chinese_gloss(title)
     if gloss:

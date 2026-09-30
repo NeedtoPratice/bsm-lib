@@ -273,6 +273,26 @@ check "no -metals rename"    "$([ -f "$R/t19/5th Simfoniа - At Vance.mp3" ] && 
 check "multi-dash name kept" "$([ -f "$R/t19/Four Seasons - Spring - At Vance.mp3" ] && echo yes)" "yes"
 check "impossible name left" "$([ -f "$R/t19/EXEC_COSMOFLIPS. - KOKIA.mp3" ] && echo yes)" "yes"
 
+echo "== T20 a multi-artist tag is normalised even with no ' - ' in the name =="
+mkdir -p "$R/t20"
+sine libmp3lame "$R/t20/07 Ex-Otogibanashi.mp3"
+python3 -c "
+from mutagen.id3 import ID3, TIT2, TPE1
+t=ID3(); t.add(TIT2(encoding=3, text=['Ex-Otogibanashi']))
+t.add(TPE1(encoding=3, text=['A(cv.X), B(cv.Y)'])); t.save('$R/t20/07 Ex-Otogibanashi.mp3')"
+run "$R/t20" --steps tags --report-dir "$R/reports"
+check "tag gets semicolon" "$(python3 "$S/tagval.py" "$R/t20/07 Ex-Otogibanashi.mp3" artist)" "A(cv.X);B(cv.Y)"
+run "$R/t20" --steps rename --report-dir "$R/reports"
+check "name gets semicolon" "$([ -f "$R/t20/Ex-Otogibanashi - A(cv.X);B(cv.Y).mp3" ] && echo yes)" "yes"
+
+echo "== T21 clean adds a missing final newline =="
+mkdir -p "$R/t21"; sine libmp3lame "$R/t21/h.mp3"
+printf '[00:01.00]Line' > "$R/t21/h.lrc"       # deliberately no trailing newline
+run "$R/t21" --steps clean --report-dir "$R/reports"
+check "newline added" "$(python3 -c "print(open('$R/t21/h.lrc','rb').read().endswith(b'\n'))")" "True"
+run "$R/t21" --steps clean --report-dir "$R/reports"
+check "then idempotent" "$(python3 -c "d=open('$R/t21/h.lrc','rb').read(); print(d.count(b'\n'))")" "1"
+
 echo "== T18 the silent steps now write reports =="
 for name in nolyrics_report.txt bilingual_report.txt romaji_report.txt tags_report.txt embed_report.txt rename_report.txt; do
     check "report $name" "$(find "$R/reports" -name "$name" | head -1 | grep -c . )" "1"
