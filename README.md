@@ -3,7 +3,7 @@
 MPD / rmpc 曲库的规范化与维护工具。它把一套明确的歌词与标签格式写成规则，批量套用到
 整个曲库；每一步先把完整改动清单落盘，再问你要不要执行。
 
-* **入口**：`music_lib.py`，单文件，除 `mutagen` 外无依赖
+* **入口**：`bsm.py`，单文件，除 `mutagen` 外无依赖
 * **规则即数据**：`rules/` 与 `manual/` 下的文本文件，增删词条不需要改代码
 * **可反复运行**：所有步骤幂等，跑第二遍不会有任何改动
 * **可回滚**：`--backup` 把这一轮改动前的原件留在 `backups/<时间戳>/`
@@ -50,13 +50,24 @@ MPD / rmpc 曲库的规范化与维护工具。它把一套明确的歌词与标
 pip install mutagen
 ```
 
+想在终端里直接敲 `bsm` 运行，把入口脚本软链到 `~/.local/bin`（该目录一般在 `PATH` 上）：
+
+```bash
+chmod +x bsm.py
+ln -sf "$PWD/bsm.py" ~/.local/bin/bsm
+bsm --dry-run          # 验证
+```
+
+脚本用 `Path(__file__).resolve().parent` 定位自身目录，会跟随软链，因此规则、报告与备份
+仍落在仓库里，与在仓库内直接运行完全一致。
+
 ## 用法
 
 ```bash
-python3 music_lib.py                        # 交互式跑完整流程（默认 ~/Music）
-python3 music_lib.py ~/Music --backup       # 带备份
-python3 music_lib.py --steps clean,bilingual
-python3 music_lib.py --dry-run              # 只预演，不写任何东西
+python3 bsm.py                        # 交互式跑完整流程（默认 ~/Music）
+python3 bsm.py ~/Music --backup       # 带备份
+python3 bsm.py --steps clean,bilingual
+python3 bsm.py --dry-run              # 只预演，不写任何东西
 ```
 
 每一个步骤执行两遍：
@@ -174,7 +185,7 @@ First Light - Camel.lrc
 bash tests/regress.sh             # 合成曲库回归，97 项，从不访问真实曲库
 python3 tests/audit.py [目录]      # 只读审计：各步骤还会改动什么
 python3 tests/verify.py [目录]     # 只读验收：是否已符合格式，全部计数应为 0
-python3 music_lib.py --dry-run     # 全流程预演，零写入
+python3 bsm.py --dry-run           # 全流程预演，零写入
 ```
 
 运行结束时，工具会自行比对音频内嵌歌词与 `.lrc` 是否一致；不一致时给出提示

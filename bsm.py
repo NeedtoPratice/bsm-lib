@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
 """Unified maintenance for an MPD/rmpc music library.
 
-This single script replaces the former set:
-
-    fix_ogg_titles.py + extract_lrc_rmpc.py + normalize_no_lyrics.py
-    + bilingual_lrc.py + reorder_romaji.py + one_click_update.sh
-
 The library standard it enforces:
 
 * a ``.lrc`` holds lyrics and nothing but lyrics -- no ``[ti:]``/``[ar:]``/
@@ -40,12 +35,12 @@ refuses to write.  ``--backup`` keeps this run's originals under
 ``backups/<timestamp>/``: ``.lrc`` files in full, audio files as a tag dump.
 
 Examples:
-    ./music_lib.py                                  # interactive full pipeline
-    ./music_lib.py --dry-run                        # show, write nothing at all
-    ./music_lib.py --steps clean,bilingual --backup
-    ./music_lib.py /path/to/Music --steps extract --yes
-    ./music_lib.py --steps bilingual --only-duplicates
-    ./music_lib.py --steps bilingual --max-lines 2
+    ./bsm.py                                        # interactive full pipeline
+    ./bsm.py --dry-run                              # show, write nothing at all
+    ./bsm.py --steps clean,bilingual --backup
+    ./bsm.py /path/to/Music --steps extract --yes
+    ./bsm.py --steps bilingual --only-duplicates
+    ./bsm.py --steps bilingual --max-lines 2
 """
 
 from __future__ import annotations

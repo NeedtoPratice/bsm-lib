@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regression suite for music_lib.py. Builds a synthetic library under tests/regress/
+# Regression suite for bsm.py. Builds a synthetic library under tests/regress/
 # and never touches ~/Music.
 #
 # Every case runs with --yes because a non-interactive run refuses to write
@@ -7,7 +7,7 @@
 cd "$(dirname "$0")/.." || exit 1   # musicManage/
 S=tests
 R=$S/regress
-ML=./music_lib.py
+ML=./bsm.py
 FLAGS="--yes --no-refresh"
 pass=0; fail=0
 
@@ -319,7 +319,7 @@ check "override applied" "$([ -f "$R/t24/Federation - Ben Prunty.mp3" ] && echo 
 check "tag agrees"       "$(python3 "$S/tagval.py" "$R/t24/Federation - Ben Prunty.mp3" title)" "Federation"
 check "override inert"   "$(python3 -c "
 import sys; sys.path.insert(0, '.')
-import music_lib as M, pathlib
+import bsm as M, pathlib
 print(M.desired_name_fields(pathlib.Path('$R/t24/Federation - Ben Prunty.mp3'))[0])")" "Federation"
 
 echo "== T18 the silent steps now write reports =="
