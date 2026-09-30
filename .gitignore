@@ -1,0 +1,13 @@
+# 生成物：报告与备份都留在本机，不进版本库
+/reports/
+/backups/
+
+# 回归与临时目录
+/tests/regress/
+/tests/smoke*/
+/tests/out/
+/tests/*.log
+/tests/ab_*.txt
+
+__pycache__/
+*.py[cod]

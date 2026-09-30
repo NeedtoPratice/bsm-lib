@@ -70,7 +70,7 @@ except ImportError as _e:  # pragma: no cover - environment guard
     raise SystemExit(2)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_MUSIC_DIR = "/home/NeedtoPratice/Music"
+DEFAULT_MUSIC_DIR = str(Path.home() / "Music")
 # Everything this tool generates stays inside musicManage/: review reports here,
 # backups under backups/<timestamp>/ (see README.md).
 DEFAULT_REPORT_DIR = SCRIPT_DIR / "reports"

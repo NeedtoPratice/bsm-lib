@@ -1,7 +1,12 @@
 # musicManage —— 音乐库维护
 
-这个目录是本机 MPD/rmpc 曲库（`~/Music`）的全部维护工具、规则、报告与备份。
-入口只有一个脚本：`music_lib.py`。
+MPD/rmpc 曲库（默认 `~/Music`）的维护工具：把一套歌词/标签规范写进脚本，
+每次运行逐步交互，改什么先给你看报告。入口只有一个脚本：`music_lib.py`。
+
+许可：MIT（见 `LICENSE`）。
+
+> `rules/name-overrides.txt` 与 `manual/instrumental.txt` 里各有一两条作者自己曲库的条目，
+> 它们同时也是回归套件的固定用例；照着格式加你自己的即可。
 
 ```
 musicManage/
@@ -140,7 +145,7 @@ musicManage/
 ## 六、怎么验证
 
 ```bash
-bash tests/regress.sh      # 合成曲库，86 项，从不碰 ~/Music
+bash tests/regress.sh      # 合成曲库，97 项，从不碰 ~/Music
 python3 tests/audit.py     # 只读审计真实曲库：改动面、敞口、不动点
 python3 music_lib.py --dry-run    # 真曲库全流程预演，零写入
 ```
