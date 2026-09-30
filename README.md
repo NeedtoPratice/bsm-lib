@@ -76,17 +76,15 @@ python3 music_lib.py --dry-run              # 只预演，不写任何东西
 
 ### 开关
 
-| 开关 | 作用 |
-|---|---|
-| `--steps LIST` | 只运行指定步骤，逗号分隔，或 `all` |
-| `--dry-run` | 预演：不改文件、不写报告、不备份 |
-| `--yes` | 不询问直接执行（仍写报告与备份），用于非交互场景 |
-| `--backup` | 把本轮改动前的原件存入 `backups/<时间戳>/` |
-| `--report-dir DIR` | 报告根目录，默认 `reports/` |
-| `--no-refresh` | 结束后不刷新 MPD 数据库 |
-| `--overwrite` | `extract`：覆盖已存在的 `.lrc` |
-| `--only-duplicates` | `bilingual`：只处理已有重复时间戳的文件 |
-| `--max-lines N` | `bilingual`：每个时间戳最多保留 N 行 |
+* `--steps LIST` —— 只运行指定步骤，逗号分隔，或 `all`
+* `--dry-run` —— 预演：不改文件、不写报告、不备份
+* `--yes` —— 不询问直接执行（仍写报告与备份），用于非交互场景
+* `--backup` —— 把本轮改动前的原件存入 `backups/<时间戳>/`
+* `--report-dir DIR` —— 报告根目录，默认 `reports/`
+* `--no-refresh` —— 结束后不刷新 MPD 数据库
+* `--overwrite` —— `extract`：覆盖已存在的 `.lrc`
+* `--only-duplicates` —— `bilingual`：只处理已有重复时间戳的文件
+* `--max-lines N` —— `bilingual`：每个时间戳最多保留 N 行
 
 `stdin` 不是终端时，除非指定 `--yes`，否则拒绝写入并以退出码 2 结束。
 
@@ -97,32 +95,70 @@ python3 music_lib.py --dry-run              # 只预演，不写任何东西
 
 按默认顺序执行：
 
-| 步骤 | 作用 |
-|---|---|
-| `ogg` | 为缺少标题标签的 `.ogg` 用文件名补上 |
-| `extract` | 把音频内嵌的歌词抽成 `.lrc`（已存在则不动） |
-| `clean` | 清除全部非歌词内容：能搬进标签的作者信息搬走，其余（头部标签、标题行、来源站声明、站点数据块）逐条记入报告后删除 |
-| `nolyrics` | 没有歌词的歌，只写一行 `[00:00.00]No lyrics` |
-| `bilingual` | 给无时间戳的续行补上上一行的时间戳，并把同一时间戳的行归拢到一起 |
-| `romaji` | 把罗马音移到外文与中文之间，得到 `外文 / 罗马音 / 中文` 的顺序 |
-| `tags` | 使标签与文件名一致：作者、专辑作者、中文翻译括号、重复的 ` - 作者`、`TRACKNUMBER` |
-| `embed` | 把 `.lrc` 写回音频内嵌歌词（`.mp3`→`USLT`，`.flac`/`.ogg`→`LYRICS`，`.m4a`→`©lyr`） |
-| `rename` | 音频文件名改为 `歌名 - 作者`，`.lrc` 同步改名 |
+1. **`ogg`** —— 为缺少标题标签的 `.ogg` 用文件名补上
+2. **`extract`** —— 把音频内嵌的歌词抽成 `.lrc`（已存在则不动）
+3. **`clean`** —— 清除全部非歌词内容：能搬进标签的作者信息搬走，其余（头部标签、
+   标题行、来源站声明、站点数据块）逐条记入报告后删除
+4. **`nolyrics`** —— 没有歌词的歌，只写一行 `[00:00.00]No lyrics`
+5. **`bilingual`** —— 给无时间戳的续行补上上一行的时间戳，并把同一时间戳的行归拢到一起
+6. **`romaji`** —— 把罗马音移到外文与中文之间，得到 `外文 / 罗马音 / 中文` 的顺序
+7. **`tags`** —— 使标签与文件名一致：作者、专辑作者、中文翻译括号、重复的 ` - 作者`、
+   `TRACKNUMBER`
+8. **`embed`** —— 把 `.lrc` 写回音频内嵌歌词（`.mp3`→`USLT`，`.flac`/`.ogg`→`LYRICS`，
+   `.m4a`→`©lyr`）
+9. **`rename`** —— 音频文件名改为 `歌名 - 作者`，`.lrc` 同步改名
 
 `tags` 与 `rename` 共用同一套取名规则，因此单独运行任何一个、或以任意顺序运行，
 得到的结果一致。
 
 ## 规则即数据
 
-| 文件 | 格式 | 作用 |
-|---|---|---|
-| `rules/roles.txt` | `写法 = 字段` | 作者/职位写法到规范字段的映射 |
-| `rules/instruments.txt` | `写法 = 英文乐器名` | 乐器写法，映射为 `performer:<英文名>` |
-| `rules/notices.txt` | 每行一个正则 | 来源站声明模板，命中即整行删除 |
-| `rules/name-overrides.txt` | `<文件名> = <歌名> [\| <作者>]` | 逐文件的取名覆盖，按**文件名**做键 |
-| `manual/instrumental.txt` | 每行一个 `.lrc` 文件名 | 人工判定为纯音乐的文件，正文不解析、直接按无歌词处理 |
+### `rules/roles.txt` —— 作者与职位的写法
 
-`rules/name-overrides.txt` 的条目在生效一次后即不再匹配（文件名已改变），不会反复重写。
+每行一条 `写法 = 规范字段`。只有整行的角色部分都能在这里查到，该行才会被当作作者信息
+搬进音频标签；查不到的写法一律按歌词保留。
+
+```text
+作词 = lyricist
+作曲 = composer
+编曲 = arranger
+```
+
+### `rules/instruments.txt` —— 乐器
+
+每行一条 `写法 = 英文乐器名`，命中的行写作 `performer:<英文名>`。
+
+```text
+吉他 = guitar
+钢琴 = piano
+```
+
+### `rules/notices.txt` —— 来源站声明
+
+每行一个正则，命中的整行删除。
+
+```text
+享有本翻译作品的著作权
+以下歌词翻译由.+提供
+```
+
+### `rules/name-overrides.txt` —— 逐文件的取名覆盖
+
+每行一条 `<文件名> = <歌名>`，或 `<文件名> = <歌名> | <作者>`。键是**文件名**而不是
+歌名，因为两首歌可能同名。条目在生效一次后即不再匹配（文件名已改变），不会反复重写。
+
+```text
+BONUS Federation - Ben Prunty = Federation
+Odyssey - Dysphorid = Odyssey | D-music
+```
+
+### `manual/instrumental.txt` —— 纯音乐清单
+
+每行一个 `.lrc` 文件名。列在这里的文件不解析正文，直接按无歌词处理。
+
+```text
+First Light - Camel.lrc
+```
 
 ## 报告与备份
 
