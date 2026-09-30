@@ -170,9 +170,17 @@ check "next untouched"       "$(sed -n '4p' "$R/t11/f.lrc")" "[00:20.00]Next"
 
 echo "== T12 manual/instrumental.txt declaration =="
 mkdir -p "$R/t12"; sine libmp3lame "$R/t12/First Light - Camel.mp3"
-printf '[00:35.400]Andrew Latimer\n[00:35.790]Guitars Pan\n[00:36.120]Pipes Peter\n' > "$R/t12/First Light - Camel.lrc"
-run "$R/t12" --steps clean,nolyrics --report-dir "$R/reports"
-check "declared instrumental" "$(cat "$R/t12/First Light - Camel.lrc")" "[00:00.00]No lyrics"
+# The real file carries the placeholder line as well; clean must keep it there.
+printf '[00:00.00]No lyrics\n[00:35.400]Andrew Latimer\n[00:35.790]Guitars Pan\n' > "$R/t12/First Light - Camel.lrc"
+run "$R/t12" --steps clean --report-dir "$R/reports"
+check "clean leaves it finished" "$(cat "$R/t12/First Light - Camel.lrc")" "[00:00.00]No lyrics"
+run "$R/t12" --steps nolyrics --report-dir "$R/reports"
+check "nolyrics then no-op"      "$(cat "$R/t12/First Light - Camel.lrc")" "[00:00.00]No lyrics"
+# And when nothing at all is left, nolyrics puts the line back.
+mkdir -p "$R/t12b"; sine libmp3lame "$R/t12b/First Light - Camel.mp3"
+printf '[00:35.400]Andrew Latimer\n' > "$R/t12b/First Light - Camel.lrc"
+run "$R/t12b" --steps clean,nolyrics --report-dir "$R/reports"
+check "emptied then refilled" "$(cat "$R/t12b/First Light - Camel.lrc")" "[00:00.00]No lyrics"
 
 echo "== T13 a non-interactive run refuses to write without --yes =="
 mkdir -p "$R/t13"; sine libmp3lame "$R/t13/g.mp3"; printf '[ti:X]\n[00:01.00]L\n' > "$R/t13/g.lrc"
@@ -189,6 +197,90 @@ check "has header tag"    "$([ "$(printf '%s' "$all" | grep -c '(header tag)')" 
 check "has notice reason" "$([ "$(printf '%s' "$all" | grep -c 'source-site notice')" -gt 0 ] && echo yes)" "yes"
 check "has title reason"  "$([ "$(printf '%s' "$all" | grep -c '(title line)')" -gt 0 ] && echo yes)" "yes"
 check "lists the file"    "$(printf '%s' "$all" | grep -c -- '--- e.lrc')" "1"
+
+echo "== T15 tags: artist from the file name, title from the tag =="
+mkdir -p "$R/t15"
+sine libmp3lame "$R/t15/5th Simfoniа - At Vance.mp3"
+tag "$R/t15/5th Simfoniа - At Vance.mp3" "5th Simfoniа" "metals"
+python3 -c "
+from mutagen.id3 import ID3, TRCK
+t=ID3('$R/t15/5th Simfoniа - At Vance.mp3'); t.add(TRCK(encoding=3, text=['03'])); t.save()"
+sine libmp3lame "$R/t15/銀の龍の背に乗って (骑在银龙的背上) - 中岛美雪.mp3"
+tag "$R/t15/銀の龍の背に乗って (骑在银龙的背上) - 中岛美雪.mp3" "銀の龍の背に乗って (骑在银龙的背上)" "中島みゆき"
+sine libmp3lame "$R/t15/Alive.mp3"
+tag "$R/t15/Alive.mp3" "Alive" "P-Music"
+run "$R/t15" --steps tags --report-dir "$R/reports"
+tv() { python3 "$S/tagval.py" "$1" "$2"; }
+check "artist from name"   "$(tv "$R/t15/5th Simfoniа - At Vance.mp3" artist)" "At Vance"
+check "old artist kept"    "$(tv "$R/t15/5th Simfoniа - At Vance.mp3" albumartist)" "metals"
+check "track unpadded"     "$(tv "$R/t15/5th Simfoniа - At Vance.mp3" tracknumber)" "3"
+check "gloss dropped"      "$(tv "$R/t15/銀の龍の背に乗って (骑在银龙的背上) - 中岛美雪.mp3" title)" "銀の龍の背に乗って"
+check "artist replaced"    "$(tv "$R/t15/銀の龍の背に乗って (骑在银龙的背上) - 中岛美雪.mp3" artist)" "中岛美雪"
+check "old jp artist kept" "$(tv "$R/t15/銀の龍の背に乗って (骑在银龙的背上) - 中岛美雪.mp3" albumartist)" "中島みゆき"
+check "no dash untouched"  "$(tv "$R/t15/Alive.mp3" artist)" "P-Music"
+
+echo "== T16 embed: the .lrc goes into the audio file =="
+mkdir -p "$R/t16"; sine libmp3lame "$R/t16/a.mp3"; printf '[00:01.00]Line\n' > "$R/t16/a.lrc"
+sine flac "$R/t16/b.flac"; printf '[00:02.00]Flac line\n' > "$R/t16/b.lrc"
+run "$R/t16" --steps embed --report-dir "$R/reports"
+check "mp3 USLT" "$(python3 -c "
+from mutagen.id3 import ID3; print(ID3('$R/t16/a.mp3').getall('USLT')[0].text.strip())")" "[00:01.00]Line"
+check "flac LYRICS" "$(python3 -c "
+from mutagen import File; print(File('$R/t16/b.flac')['LYRICS'][0].strip())")" "[00:02.00]Flac line"
+$ML "$R/t16" --steps embed $FLAGS --report-dir "$R/reports" > "$R/t16.log" 2>&1
+check "idempotent" "$(grep -cE 'Skipped \(already identical\): +2$' "$R/t16.log")" "1"
+
+echo "== T17 rename: '<title> - <artist>', .lrc follows, collisions reported =="
+mkdir -p "$R/t17"
+# Tagged with ffmpeg so each container gets its own tag format (ID3 for mp3,
+# Vorbis for flac).  -metadata must come *before* the output path.
+ffmpeg -hide_banner -loglevel error -f lavfi -i "sine=frequency=440:duration=3" \
+    -map_metadata -1 -c:a flac -metadata title="Remember" -metadata artist="月見ヤチヨ" \
+    "$R/t17/01 Remember.flac"
+printf '[00:01.00]L\n' > "$R/t17/01 Remember.lrc"
+ffmpeg -hide_banner -loglevel error -f lavfi -i "sine=frequency=440:duration=3" \
+    -map_metadata -1 -c:a libmp3lame -metadata title="Remember" -metadata artist="月見ヤチヨ" \
+    "$R/t17/x.mp3"
+run "$R/t17" --steps rename --report-dir "$R/reports"
+check "audio renamed"  "$([ -f "$R/t17/Remember - 月見ヤチヨ.flac" ] && echo yes)" "yes"
+check "lrc followed"   "$([ -f "$R/t17/Remember - 月見ヤチヨ.lrc" ] && echo yes)" "yes"
+check "old name gone"  "$([ -f "$R/t17/01 Remember.flac" ] && echo yes || echo no)" "no"
+check "conflict kept"  "$([ -f "$R/t17/x.mp3" ] && echo yes)" "yes"
+
+echo "== T19 tags/rename agree, and never mangle a name =="
+mkdir -p "$R/t19"
+# A tidied-up artist tag must not undo the artist the name already carries,
+# whether or not the tags step ran first.
+sine libmp3lame "$R/t19/5th Simfoniа - At Vance.mp3"
+tag "$R/t19/5th Simfoniа - At Vance.mp3" "5th Simfoniа" "metals"
+# A title containing " - " splits at the last separator, not the first.
+ffmpeg -hide_banner -loglevel error -f lavfi -i "sine=frequency=440:duration=3" \
+    -map_metadata -1 -c:a libmp3lame -metadata title="Four Seasons - Spring" -metadata artist="metals" \
+    "$R/t19/Four Seasons - Spring - At Vance.mp3"
+# A title that repeats the artist gets it trimmed.
+sine libmp3lame "$R/t19/Intro - The Ocean.mp3"
+tag "$R/t19/Intro - The Ocean.mp3" "Intro - The Ocean" "The Ocean"
+# A "/" cannot be in a file name: leave the file alone instead of mangling it.
+sine libmp3lame "$R/t19/EXEC_COSMOFLIPS. - KOKIA.mp3"
+tag "$R/t19/EXEC_COSMOFLIPS. - KOKIA.mp3" "EXEC_COSMOFLIPS/." "KOKIA"
+run "$R/t19" --steps tags --report-dir "$R/reports"
+tv() { python3 "$S/tagval.py" "$1" "$2"; }
+check "tidied tag ignored"     "$(tv "$R/t19/5th Simfoniа - At Vance.mp3" artist)" "At Vance"
+check "trailing artist gone"   "$(tv "$R/t19/Intro - The Ocean.mp3" title)" "Intro"
+check "multi-dash title kept"  "$(tv "$R/t19/Four Seasons - Spring - At Vance.mp3" artist)" "At Vance"
+run "$R/t19" --steps rename --report-dir "$R/reports"
+check "no -metals rename"    "$([ -f "$R/t19/5th Simfoniа - At Vance.mp3" ] && echo yes)" "yes"
+check "multi-dash name kept" "$([ -f "$R/t19/Four Seasons - Spring - At Vance.mp3" ] && echo yes)" "yes"
+check "impossible name left" "$([ -f "$R/t19/EXEC_COSMOFLIPS. - KOKIA.mp3" ] && echo yes)" "yes"
+
+echo "== T18 the silent steps now write reports =="
+for name in nolyrics_report.txt bilingual_report.txt romaji_report.txt tags_report.txt embed_report.txt rename_report.txt; do
+    check "report $name" "$(find "$R/reports" -name "$name" | head -1 | grep -c . )" "1"
+done
+rep=$(find "$R/reports" -name bilingual_report.txt | head -1)
+check "bilingual lists lines" "$([ "$(grep -c 'given a timestamp' "$rep")" -gt 0 ] && echo yes)" "yes"
+rep=$(find "$R/reports" -name rename_report.txt | head -1)
+check "rename lists mapping" "$(grep -c -- '01 Remember.flac  ->  Remember - 月見ヤチヨ.flac' "$rep")" "1"
 
 echo
 echo "================================"

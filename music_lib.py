@@ -63,7 +63,7 @@ from pathlib import Path
 
 try:
     from mutagen import File as MutagenFile
-    from mutagen.id3 import ID3, TCOM, TEXT, TIPL, TMCL, TXXX, IPLS, ID3NoHeaderError
+    from mutagen.id3 import ID3, TCOM, TEXT, TIPL, TMCL, TXXX, IPLS, USLT, ID3NoHeaderError
     from mutagen.oggvorbis import OggVorbis
 except ImportError as _e:  # pragma: no cover - environment guard
     print(f"Error: could not import mutagen ({_e}). Try: pip install mutagen", file=sys.stderr)
@@ -191,7 +191,10 @@ NON_LYRIC_KEYWORDS = [
     "masteredby",
 ]
 
-STEP_ORDER = ["ogg", "extract", "clean", "nolyrics", "bilingual", "romaji"]
+STEP_ORDER = [
+    "ogg", "extract", "clean", "nolyrics", "bilingual", "romaji",
+    "tags", "embed", "rename",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -1333,10 +1336,14 @@ def plan_credit_extraction(
 
         if forced_instrumental:
             # A human declared this file instrumental (manual/instrumental.txt):
-            # keep whatever credit is still recognisable, drop the rest.
+            # keep whatever credit is still recognisable, drop the rest -- but a
+            # placeholder line is already the file's finished state, so removing
+            # it would leave the .lrc empty and make nolyrics write it back.
             parsed = parse_credit_line(content) if content else None
             if parsed is not None:
                 plan.note_credit(*parsed)
+            if is_placeholder(content):
+                continue
             plan.remove(idx, line, "declared instrumental")
             continue
 
@@ -1676,6 +1683,8 @@ def step_no_lyrics(args: argparse.Namespace, root: Path) -> StepResult:
         },
     )
 
+    written_log: list[str] = []
+
     for i, path in enumerate(files, 1):
         status = process_no_lyrics(path, args)
         if status.startswith("error"):
@@ -1683,6 +1692,8 @@ def step_no_lyrics(args: argparse.Namespace, root: Path) -> StepResult:
             result.errors.append(f"{path}: {status[7:]}")
         else:
             result.counts[status] = result.counts.get(status, 0) + 1
+            if status == "written":
+                written_log.append(f"{path.name}.lrc")
         if i % 100 == 0 or i == len(files):
             print(f"    ...{i}/{len(files)} processed")
 
@@ -1695,6 +1706,17 @@ def step_no_lyrics(args: argparse.Namespace, root: Path) -> StepResult:
             ("error", "Errors:"),
         ],
     )
+    report = write_report(
+        args.report_dir,
+        "nolyrics_report.txt",
+        "Songs with no real lyrics.  Each one's .lrc is (or would be) replaced by "
+        "the single line '[00:00.00]No lyrics'.",
+        written_log,
+        args,
+    )
+    if report:
+        result.notes.append(f"report: {report}")
+        result.reports.append(report)
     return finish(result)
 
 
@@ -1757,6 +1779,7 @@ def step_bilingual(args: argparse.Namespace, root: Path) -> StepResult:
     result = StepResult(
         "bilingual", counts={"written": 0, "skipped": 0, "truncated": 0, "error": 0}
     )
+    changed_log: list[str] = []
 
     for path in files:
         try:
@@ -1775,6 +1798,18 @@ def step_bilingual(args: argparse.Namespace, root: Path) -> StepResult:
         if new_text is None:
             result.counts["skipped"] += 1
             continue
+
+        before_set = {line.strip() for line in original.splitlines()}
+        gained = [
+            line
+            for line in new_text.splitlines()
+            if line.strip() and line.strip() not in before_set
+        ]
+        if gained:
+            changed_log.append(f"--- {path.name}   ({len(gained)} line(s) given a timestamp)")
+            changed_log.extend(f"    {line}" for line in gained)
+        else:
+            changed_log.append(f"--- {path.name}   (lines regrouped)")
 
         if not args.apply:
             print(f"    WOULD UPDATE: {path}")
@@ -1801,6 +1836,17 @@ def step_bilingual(args: argparse.Namespace, root: Path) -> StepResult:
             ("error", "Errors:"),
         ],
     )
+    report = write_report(
+        args.report_dir,
+        "bilingual_report.txt",
+        "Lines that had no timestamp and were given their neighbour's, which is what "
+        "puts an original, its romaji and its translation at the same moment.",
+        changed_log,
+        args,
+    )
+    if report:
+        result.notes.append(f"report: {report}")
+        result.reports.append(report)
     if result.counts["truncated"]:
         result.notes.append(
             "note: --max-lines dropped lyric lines; those lines are gone from the .lrc "
@@ -1871,6 +1917,7 @@ def step_romaji(args: argparse.Namespace, root: Path) -> StepResult:
     print(f"  Found {len(files)} .lrc files under {root}")
 
     result = StepResult("romaji", counts={"written": 0, "skipped": 0, "error": 0})
+    changed_log: list[str] = []
 
     for path in files:
         try:
@@ -1884,6 +1931,14 @@ def step_romaji(args: argparse.Namespace, root: Path) -> StepResult:
         if new_text is None:
             result.counts["skipped"] += 1
             continue
+
+        before_set = {line.strip() for line in original.splitlines()}
+        changed_log.append(f"--- {path.name}")
+        changed_log.extend(
+            f"    {line}"
+            for line in new_text.splitlines()
+            if line.strip() and line.strip() not in before_set
+        )
 
         if not args.apply:
             print(f"    WOULD UPDATE: {path}")
@@ -1905,6 +1960,16 @@ def step_romaji(args: argparse.Namespace, root: Path) -> StepResult:
         result.counts,
         [("written", "Updated:"), ("skipped", "Skipped/unchanged:"), ("error", "Errors:")],
     )
+    report = write_report(
+        args.report_dir,
+        "romaji_report.txt",
+        "Groups whose romaji line was moved in front of the translation.",
+        changed_log,
+        args,
+    )
+    if report:
+        result.notes.append(f"report: {report}")
+        result.reports.append(report)
     return finish(result)
 
 
@@ -1934,6 +1999,452 @@ def refresh_mpd() -> bool:
             return True
     print("  Warning: neither rmpc nor mpc found, please update MPD manually")
     return False
+
+
+# ---------------------------------------------------------------------------
+# Step: normalise the tags the file name is built from
+# ---------------------------------------------------------------------------
+
+
+# A trailing "(...)" that holds only Han characters, on a title whose head is
+# kana: "銀の龍の背に乗って (骑在银龙的背上)" -> "銀の龍の背に乗って".  Deliberately
+# narrow -- "ray (超かぐや姫！ Version)", "(feat. 茶太)" and "(5人Ver.)" all keep
+# their brackets, because the inside carries kana or Latin.
+TRAILING_GLOSS_RE = re.compile(r"\s*[（(]\s*([^（()）]*?)\s*[)）]\s*$")
+KANA_RE = re.compile(r"[\u3040-\u30ff]")
+HAN_RE = re.compile(r"[\u4e00-\u9fff]")
+LATIN_RE = re.compile(r"[A-Za-z]")
+
+# A multi-artist value gets one spelling: "A、B" and "A, B" both become "A;B".
+# Measured before switching it on: the library has 2 values containing ", " and
+# both really are two artists, and 0 containing " & " -- so there is no
+# "Earth, Wind & Fire" to break.  Every change lands in the report either way.
+ARTIST_SEP_RE = re.compile(r"\s*[、;]\s*|\s*,\s*")
+
+
+def strip_chinese_gloss(title: str) -> tuple[str, str | None]:
+    """Return (title without its Chinese translation, the removed gloss or None)."""
+    m = TRAILING_GLOSS_RE.search(title)
+    if not m:
+        return title, None
+    inner, head = m.group(1), title[: m.start()]
+    if (
+        KANA_RE.search(head)
+        and HAN_RE.search(inner)
+        and not KANA_RE.search(inner)
+        and not LATIN_RE.search(inner)
+    ):
+        return head.strip(), inner
+    return title, None
+
+
+def normalize_artist(value: str) -> str:
+    return ARTIST_SEP_RE.sub(";", value.strip())
+
+
+def filename_title_artist(stem: str, tag_title: str = "") -> tuple[str | None, str | None]:
+    """(title, artist) as the file name spells them, per '<title> - <artist>'.
+
+    A title can itself contain " - " ("Four Seasons - Spring - At Vance"), so the
+    split is at the **last** separator, and when the tag's title spells the whole
+    prefix that spelling is trusted outright.
+    """
+    if " - " not in stem:
+        return None, None
+    if tag_title and stem.startswith(f"{tag_title} - "):
+        return tag_title, stem[len(tag_title) + 3:].strip() or None
+    head, tail = stem.rsplit(" - ", 1)
+    return head.strip() or None, tail.strip() or None
+
+
+@dataclass
+class TagPlan:
+    """The tag fixes one audio file needs, and why."""
+
+    changes: dict[str, str] = field(default_factory=dict)
+    notes: list[str] = field(default_factory=list)
+
+
+def desired_name_fields(path: Path) -> tuple[str, str, list[str]]:
+    """The title and artist the file name should be built from, plus why.
+
+    One rule, shared by ``tags`` and ``rename``, so the two can never disagree:
+    **the file name is the authority on the artist** -- a tag that was tidied up
+    (a compilation's "metals" standing in for the real performers) gets the
+    name's spelling back -- and **the tag is the authority on the title**, with
+    two cleanups: a Chinese translation bolted on the end, and a title that
+    already repeats " - <artist>" (some tags carry the whole heading).
+    """
+    notes: list[str] = []
+    tag_title = tag_artist = ""
+    audio = MutagenFile(path, easy=True)
+    if audio is not None:
+        raw_title = audio.get("title")
+        raw_artist = audio.get("artist")
+        if isinstance(raw_title, list) and raw_title:
+            tag_title = str(raw_title[0]).strip()
+        if isinstance(raw_artist, list) and raw_artist:
+            tag_artist = str(raw_artist[0]).strip()
+
+    fn_title, fn_artist = filename_title_artist(path.stem, tag_title)
+
+    title = tag_title
+    if not title and fn_title:
+        title = fn_title
+        notes.append(f"title from the file name: {fn_title!r}")
+
+    artist = normalize_artist(fn_artist) if fn_artist else tag_artist
+
+    title, gloss = strip_chinese_gloss(title)
+    if gloss:
+        notes.append(f"dropped the Chinese gloss {gloss!r}")
+
+    if artist and title.endswith(f" - {artist}"):
+        title = title[: -len(f" - {artist}")].strip()
+        notes.append(f"dropped the trailing ' - {artist}' from the title")
+
+    return title, artist, notes
+
+
+def plan_tag_normalization(path: Path) -> TagPlan:
+    """Work out the title/artist/album-artist/track fixes for one audio file."""
+    plan = TagPlan()
+    audio = MutagenFile(path, easy=True)
+    if audio is None:
+        return plan
+
+    def get(key: str) -> str:
+        value = audio.get(key)
+        if isinstance(value, list):
+            return str(value[0]).strip() if value else ""
+        return str(value).strip() if value else ""
+
+    current_title = get("title")
+    current_artist = get("artist")
+    title, artist, notes = desired_name_fields(path)
+
+    if title and title != current_title:
+        plan.changes["title"] = title
+        plan.notes.append(f"title: {current_title or '(empty)'} -> {title}")
+    if artist and artist != current_artist:
+        plan.changes["artist"] = artist
+        plan.notes.append(f"artist: {current_artist or '(empty)'} -> {artist}")
+        # The value being replaced is not thrown away: it becomes the album
+        # artist, unless one is already set.
+        if current_artist and not get("albumartist"):
+            plan.changes["albumartist"] = current_artist
+            plan.notes.append(f"album artist: (empty) -> {current_artist}")
+
+    track = get("tracknumber")
+    if re.fullmatch(r"0\d+", track):
+        plan.changes["tracknumber"] = str(int(track))
+        plan.notes.append(f"tracknumber: {track} -> {plan.changes['tracknumber']}")
+
+    plan.notes.extend(notes)
+    return plan
+
+
+def apply_tag_changes(path: Path, changes: dict[str, str]) -> None:
+    audio = MutagenFile(path, easy=True)
+    if audio is None:
+        raise OSError("mutagen could not open file")
+    # EasyID3 / EasyMP4 / Vorbis all take "key = [value]", and saving keeps the
+    # frames this tool does not manage: cover art, the credits the clean step
+    # wrote, the embedded lyrics.
+    for key, value in changes.items():
+        audio[key] = [value]
+    audio.save()
+
+
+def step_tags(args: argparse.Namespace, root: Path) -> StepResult:
+    """Make the tags agree with the file name: title, artist, album artist, track."""
+    files = audio_files(root)
+    print(f"  Found {len(files)} audio files under {root}")
+
+    result = StepResult("tags", counts={"updated": 0, "skipped_ok": 0, "error": 0})
+    change_log: list[str] = []
+
+    for i, path in enumerate(files, 1):
+        if i % 100 == 0 or i == len(files):
+            print(f"    ...{i}/{len(files)} processed")
+        try:
+            plan = plan_tag_normalization(path)
+        except Exception as e:  # noqa: BLE001 - per-file isolation
+            result.counts["error"] += 1
+            result.errors.append(f"{path.name}: {e}")
+            continue
+        if not plan.changes:
+            result.counts["skipped_ok"] += 1
+            continue
+
+        change_log.append(f"--- {path.name}")
+        change_log.extend(f"    {note}" for note in plan.notes)
+
+        if not args.apply:
+            print(f"    WOULD TAG: {path.name}")
+            for note in plan.notes[:DRY_RUN_PREVIEW_LINES]:
+                print(f"        - {note}")
+            result.counts["updated"] += 1
+            continue
+
+        try:
+            if args.backup:
+                dump_tags(path, args)
+            apply_tag_changes(path, plan.changes)
+        except Exception as e:  # noqa: BLE001
+            result.counts["error"] += 1
+            result.errors.append(f"{path.name}: {e}")
+            continue
+        result.counts["updated"] += 1
+
+    report_summary(
+        result.counts,
+        [
+            ("updated", "Tag sets updated:"),
+            ("skipped_ok", "Skipped (already agree):"),
+            ("error", "Errors:"),
+        ],
+    )
+    report = write_report(
+        args.report_dir,
+        "tags_report.txt",
+        "Tag fixes, so that the file name '<title> - <artist>' is what the tags say. "
+        "An artist taken from the file name replaces a tidied-up tag; the value it "
+        "replaced is kept as the album artist.",
+        change_log,
+        args,
+    )
+    if report:
+        result.notes.append(f"report: {report}")
+        result.reports.append(report)
+    return finish(result)
+
+
+# ---------------------------------------------------------------------------
+# Step: carry the .lrc back into the audio file
+# ---------------------------------------------------------------------------
+
+
+def write_embedded_lyrics(path: Path, text: str) -> None:
+    """Store timed lyrics in the audio file's own lyrics field."""
+    ext = path.suffix.lower()
+    if ext == ".mp3":
+        try:
+            tags = ID3(path)
+        except ID3NoHeaderError:
+            tags = ID3()
+        # Exactly one lyrics frame: leaving an older one behind makes readers
+        # pick whichever they happen to hit first.
+        tags.delall("USLT")
+        tags.add(USLT(encoding=3, lang="eng", desc="", text=text))
+        tags.save(path)
+        return
+    audio = MutagenFile(path)
+    if audio is None:
+        raise OSError("mutagen could not open file")
+    key = "\xa9lyr" if ext in {".m4a", ".mp4", ".m4b"} else "LYRICS"
+    audio[key] = [text]
+    audio.save()
+
+
+def step_embed(args: argparse.Namespace, root: Path) -> StepResult:
+    """Put the cleaned .lrc into the audio file, so both carry the same lyrics."""
+    files = lrc_files(root)
+    print(f"  Found {len(files)} .lrc files under {root}")
+
+    result = StepResult(
+        "embed",
+        counts={"embedded": 0, "skipped_identical": 0, "skipped_no_audio": 0, "error": 0},
+    )
+    change_log: list[str] = []
+
+    for i, lrc in enumerate(files, 1):
+        if i % 100 == 0 or i == len(files):
+            print(f"    ...{i}/{len(files)} processed")
+
+        audio = find_audio_for_lrc(lrc)
+        if audio is None:
+            result.counts["skipped_no_audio"] += 1
+            continue
+        try:
+            text = lrc.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            result.counts["error"] += 1
+            result.errors.append(f"{lrc.name}: {e}")
+            continue
+
+        current = extract_embedded_text(audio)
+        if current is not None and current.strip() == text.strip():
+            result.counts["skipped_identical"] += 1
+            continue
+
+        change_log.append(f"{audio.name}  <-  {lrc.name}   ({len(text)} bytes)")
+
+        if not args.apply:
+            print(f"    WOULD EMBED: {audio.name}")
+            result.counts["embedded"] += 1
+            continue
+
+        try:
+            if args.backup:
+                dump_tags(audio, args)
+            write_embedded_lyrics(audio, text)
+        except Exception as e:  # noqa: BLE001
+            result.counts["error"] += 1
+            result.errors.append(f"{audio.name}: {e}")
+            continue
+        result.counts["embedded"] += 1
+
+    report_summary(
+        result.counts,
+        [
+            ("embedded", "Lyrics embedded:"),
+            ("skipped_identical", "Skipped (already identical):"),
+            ("skipped_no_audio", "Skipped (no matching audio):"),
+            ("error", "Errors:"),
+        ],
+    )
+    report = write_report(
+        args.report_dir,
+        "embed_report.txt",
+        "The .lrc written into the audio file's own lyrics field: .mp3 -> USLT, "
+        ".flac/.ogg -> LYRICS, .m4a -> (c)lyr.",
+        change_log,
+        args,
+    )
+    if report:
+        result.notes.append(f"report: {report}")
+        result.reports.append(report)
+    return finish(result)
+
+
+# ---------------------------------------------------------------------------
+# Step: file name = "<title> - <artist>"
+# ---------------------------------------------------------------------------
+
+
+def name_problem(stem: str) -> str | None:
+    """Why this cannot be a file name, or None when it is fine.
+
+    A "/" in a title would quietly turn the rename into a write into another
+    directory, so the file is **left alone and reported** rather than renamed to
+    a mangled spelling -- "EXEC_COSMOFLIPS/." should not become
+    "EXEC_COSMOFLIPS\uff0f.".  Trailing spaces and dots are trimmed, which loses
+    nothing.  In this library 4 files hit the "/" case.
+    """
+    for bad, what in (("/", "a '/'"), ("\x00", "a NUL")):
+        if bad in stem:
+            return f"name would contain {what}, left alone: {stem!r}"
+    if not stem:
+        return "name would be empty"
+    return None
+
+
+def step_rename(args: argparse.Namespace, root: Path) -> StepResult:
+    """Rename every audio file -- and its .lrc -- to "<title> - <artist>"."""
+    files = audio_files(root)
+    print(f"  Found {len(files)} audio files under {root}")
+
+    result = StepResult(
+        "rename",
+        counts={
+            "renamed": 0,
+            "skipped_ok": 0,
+            "skipped_no_title": 0,
+            "skipped_conflict": 0,
+            "skipped_bad_name": 0,
+            "error": 0,
+        },
+    )
+    change_log: list[str] = []
+    claimed: dict[str, str] = {}
+
+    for i, path in enumerate(files, 1):
+        if i % 100 == 0 or i == len(files):
+            print(f"    ...{i}/{len(files)} processed")
+
+        try:
+            # Same rule as the tags step, so running rename on its own gives the
+            # same names as running it after tags -- an artist tag that was
+            # tidied up must not undo the name the file already carries.
+            title, artist, _notes = desired_name_fields(path)
+        except Exception as e:  # noqa: BLE001
+            result.counts["error"] += 1
+            result.errors.append(f"{path.name}: {e}")
+            continue
+
+        if not title:
+            result.counts["skipped_no_title"] += 1
+            result.notes.append(f"no title tag; name left alone: {path.name}")
+            continue
+
+        target_stem = (f"{title} - {artist}" if artist else title).strip().rstrip(".")
+        problem = name_problem(target_stem)
+        if problem:
+            result.counts["skipped_bad_name"] += 1
+            result.notes.append(f"{problem}   (wanted by {path.name})")
+            continue
+        if target_stem == path.stem:
+            result.counts["skipped_ok"] += 1
+            continue
+
+        target = path.with_name(target_stem + path.suffix)
+        if target.exists():
+            result.counts["skipped_conflict"] += 1
+            result.notes.append(f"name taken: {target.name}   (wanted by {path.name})")
+            continue
+        if target_stem in claimed:
+            result.counts["skipped_conflict"] += 1
+            result.notes.append(
+                f"two songs want {target.name}: {claimed[target_stem]} and {path.name}"
+            )
+            continue
+        claimed[target_stem] = path.name
+
+        change_log.append(f"{path.name}  ->  {target.name}")
+
+        if not args.apply:
+            print(f"    WOULD RENAME: {path.name}  ->  {target.name}")
+            result.counts["renamed"] += 1
+            continue
+
+        lrc = path.with_suffix(".lrc")
+        new_lrc = target.with_suffix(".lrc")
+        try:
+            path.rename(target)
+            if lrc.exists():
+                if new_lrc.exists():
+                    result.notes.append(f"left the .lrc alone: {new_lrc.name} exists")
+                else:
+                    lrc.rename(new_lrc)
+        except OSError as e:
+            result.counts["error"] += 1
+            result.errors.append(f"{path.name}: {e}")
+            continue
+        result.counts["renamed"] += 1
+
+    report_summary(
+        result.counts,
+        [
+            ("renamed", "Renamed:"),
+            ("skipped_ok", "Skipped (name already right):"),
+            ("skipped_no_title", "Skipped (no title tag):"),
+            ("skipped_conflict", "Skipped (name taken):"),
+            ("skipped_bad_name", "Skipped (impossible name):"),
+            ("error", "Errors:"),
+        ],
+    )
+    report = write_report(
+        args.report_dir,
+        "rename_report.txt",
+        "Every audio file renamed to '<title> - <artist>', with its .lrc alongside.",
+        change_log,
+        args,
+    )
+    if report:
+        result.notes.append(f"report: {report}")
+        result.reports.append(report)
+    return finish(result)
 
 
 # ---------------------------------------------------------------------------
@@ -2039,6 +2550,9 @@ RUNNERS = {
     "nolyrics": step_no_lyrics,
     "bilingual": step_bilingual,
     "romaji": step_romaji,
+    "tags": step_tags,
+    "embed": step_embed,
+    "rename": step_rename,
 }
 
 

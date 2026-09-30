@@ -40,7 +40,26 @@ musicManage/
 * 没有歌词的歌，整个文件只有一行：`[00:00.00]No lyrics`；
 * **空行原样保留**（裸空行、带时间戳的空行都不动），脚本不新增也不删除空行。
 
-**2. 音频文件名 = `歌名 - 作者.后缀`**，两个字段都取自文件内部的标签。
+**2. 音频文件名 = `歌名 - 作者.后缀`。**
+
+* **作者取自文件名里原有的那一段**（`5th Simfoniа - At Vance` 里的 `At Vance` 是原始作者），
+  写回 `TPE1`；被它替换掉的旧值（比如合辑里被统一改成 `metals` 的那种）搬进专辑作者
+  `TPE2`，不丢。**歌名取自标签。**
+* 这两条由**同一个函数**算，所以 `tags` 与 `rename` 先跑哪个、跑不跑，结果都一样 ——
+  这一步曾经是个坑：`rename` 单独跑会读到还没修的 `metals`，把
+  `5th Simfoniа - At Vance` 改成 `5th Simfoniа - metals`。
+* 多人分隔符统一成 `;`（`A、B`、`A, B` → `A;B`）。实测全库只有 2 个值含 `, `，
+  两个都是真的两位作者，含 ` & ` 的 0 个，所以不会误伤 `Earth, Wind & Fire`。
+* 外文歌名后面跟着的 `（中文翻译）` 去掉（判据：主标题含假名 **且** 括号内是纯汉字、
+  无假名无拉丁）。`ray (超かぐや姫！ Version)`、`(feat. 茶太)`、`(5人Ver.)` 都不受影响。
+* 标签里的歌名如果自己就重复了 ` - 作者`（`Intro - The Ocean` + 作者 `The Ocean`），
+  把结尾那截去掉，否则会变成 `Intro - The Ocean - The Ocean`。
+* `TRACKNUMBER` 按标准写成不零填充的整数（`03` → `3`）。
+* 歌名里出现文件名放不下的字符（`/`）时，**这个文件原地不动、只写报告**，不做替换改写 ——
+  把 `EXEC_COSMOFLIPS/.` 改成 `EXEC_COSMOFLIPS／.` 只是把名字弄坏（全库 4 个）。
+* 歌名里含 ` - ` 的文件名按**最后一个** ` - ` 切分（`Four Seasons - Spring - At Vance`），
+  否则作者会被切错、名字被拼成 `Four Seasons - Spring - Spring - At Vance`。
+* 没有歌词的歌，`embed` 会把 `[00:00.00]No lyrics` 这一行也写进内嵌歌词，与 `.lrc` 保持一致。
 
 **3. `.lrc` 里有作者信息时，能写进音频标签的就写进去，写不进去才丢弃。**
 
@@ -54,6 +73,9 @@ musicManage/
 | `nolyrics` | 没有歌词的歌，只写一行 `[00:00.00]No lyrics` |
 | `bilingual` | 给无时间戳的续行补上上一行的时间戳，然后把同时间戳的行归拢到一起 |
 | `romaji` | 把罗马音挪到外文与中文之间（目标形态是 `外文 / 罗马音 / 中文`） |
+| `tags` | 让标签和文件名一致：作者、专辑作者、外文歌名的 `（中文翻译）`、标题里重复的 ` - 作者`、`TRACKNUMBER` |
+| `embed` | 把清干净的 `.lrc` 写回音频的内嵌歌词（`.mp3`→`USLT`，`.flac/.ogg`→`LYRICS`，`.m4a`→`©lyr`） |
+| `rename` | 音频文件名改成 `歌名 - 作者`，`.lrc` 同步改名 |
 
 ## 三、交互模型：先出报告，再问你
 
@@ -113,7 +135,13 @@ musicManage/
 ## 六、怎么验证
 
 ```bash
-bash tests/regress.sh      # 合成曲库，56 项，从不碰 ~/Music
+bash tests/regress.sh      # 合成曲库，86 项，从不碰 ~/Music
 python3 tests/audit.py     # 只读审计真实曲库：改动面、敞口、不动点
 python3 music_lib.py --dry-run    # 真曲库全流程预演，零写入
 ```
+
+## 七、每一步都有报告
+
+`clean` / `nolyrics` / `bilingual` / `romaji` / `tags` / `embed` / `rename` 都会写报告到
+`reports/<时间戳>/`，交互运行时**先落盘再问你**。没有报告的步骤只剩 `ogg`（写 `ogg_titles_report.txt`）
+和 `extract`（三个 `lrc_*_report.txt`），它们本来就有。
