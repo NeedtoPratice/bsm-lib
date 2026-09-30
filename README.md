@@ -9,7 +9,8 @@ musicManage/
 ├── rules/                规则数据（改这里，不用改代码）
 │   ├── roles.txt         作者/职位写法 → 规范字段
 │   ├── instruments.txt   乐器写法 → 英文乐器名
-│   └── notices.txt       来源站声明模板（正则）
+│   ├── notices.txt       来源站声明模板（正则）
+│   └── name-overrides.txt 逐文件的取名覆盖（按文件名做键）
 ├── manual/
 │   └── instrumental.txt  人工判定为纯音乐的文件清单
 ├── tests/
@@ -55,8 +56,12 @@ musicManage/
 * 标签里的歌名如果自己就重复了 ` - 作者`（`Intro - The Ocean` + 作者 `The Ocean`），
   把结尾那截去掉，否则会变成 `Intro - The Ocean - The Ocean`。
 * `TRACKNUMBER` 按标准写成不零填充的整数（`03` → `3`）。
-* 歌名里出现文件名放不下的字符（`/`）时，**这个文件原地不动、只写报告**，不做替换改写 ——
-  把 `EXEC_COSMOFLIPS/.` 改成 `EXEC_COSMOFLIPS／.` 只是把名字弄坏（全库 4 个）。
+* 歌名里出现文件名放不下的字符（`/`）时，**文件名里换成 `_`、标签保留原样**：
+  `Computer Face//Pure Being` 的文件名是 `Computer Face__Pure Being`，标签里仍是 `//`。
+  只在**名字**上替换，所以不丢信息，重跑还会得到同一个名字。
+* 标签本身不合意、又不想动音频时，写进 `rules/name-overrides.txt`：
+  `<现在的文件名> = <想要的歌名> [| <想要的作者>]`。键是**文件名**不是歌名 ——
+  库里有两首歌都叫 `Odyssey`，按歌名做键会一次改中两个。生效一次后键就不匹配了，条目自动失效。
 * 歌名里含 ` - ` 的文件名按**最后一个** ` - ` 切分（`Four Seasons - Spring - At Vance`），
   否则作者会被切错、名字被拼成 `Four Seasons - Spring - Spring - At Vance`。
 * 没有歌词的歌，`embed` 会把 `[00:00.00]No lyrics` 这一行也写进内嵌歌词，与 `.lrc` 保持一致。

@@ -85,10 +85,10 @@ for p in audio:
     if not title:
         bad("no title tag", p.name)
         continue
-    wanted = (f"{title} - {artist}" if artist else title).strip().rstrip(".")
+    wanted = M.safe_stem(title, artist)
     problem = M.name_problem(wanted)
     if problem:
-        continue  # e.g. a "/" in the title: deliberately left alone
+        continue  # nothing legal to build, e.g. an empty title
     if p.stem != wanted:
         bad("name != '<title> - <artist>'", f"{p.stem}  (want {wanted})")
 

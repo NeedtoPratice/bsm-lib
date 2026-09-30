@@ -260,7 +260,7 @@ ffmpeg -hide_banner -loglevel error -f lavfi -i "sine=frequency=440:duration=3" 
 # A title that repeats the artist gets it trimmed.
 sine libmp3lame "$R/t19/Intro - The Ocean.mp3"
 tag "$R/t19/Intro - The Ocean.mp3" "Intro - The Ocean" "The Ocean"
-# A "/" cannot be in a file name: leave the file alone instead of mangling it.
+# A "/" cannot be in a file name: the name substitutes it (see T23).
 sine libmp3lame "$R/t19/EXEC_COSMOFLIPS. - KOKIA.mp3"
 tag "$R/t19/EXEC_COSMOFLIPS. - KOKIA.mp3" "EXEC_COSMOFLIPS/." "KOKIA"
 run "$R/t19" --steps tags --report-dir "$R/reports"
@@ -271,7 +271,7 @@ check "multi-dash title kept"  "$(tv "$R/t19/Four Seasons - Spring - At Vance.mp
 run "$R/t19" --steps rename --report-dir "$R/reports"
 check "no -metals rename"    "$([ -f "$R/t19/5th Simfoniа - At Vance.mp3" ] && echo yes)" "yes"
 check "multi-dash name kept" "$([ -f "$R/t19/Four Seasons - Spring - At Vance.mp3" ] && echo yes)" "yes"
-check "impossible name left" "$([ -f "$R/t19/EXEC_COSMOFLIPS. - KOKIA.mp3" ] && echo yes)" "yes"
+check "slash substituted"    "$([ -f "$R/t19/EXEC_COSMOFLIPS_. - KOKIA.mp3" ] && echo yes)" "yes"
 
 echo "== T20 a multi-artist tag is normalised even with no ' - ' in the name =="
 mkdir -p "$R/t20"
@@ -303,6 +303,24 @@ $ML "$R/t22" --steps nolyrics $FLAGS --report-dir "$R/reports" > "$R/t22.log" 2>
 check "drift reported" "$(grep -c 'the audio is out of date' "$R/t22.log")" "1"
 $ML "$R/t22" --steps embed $FLAGS --report-dir "$R/reports" > "$R/t22b.log" 2>&1
 check "after embed, quiet" "$(grep -c 'out of date' "$R/t22b.log")" "0"
+
+echo "== T23 a '/' in the title goes into the name as '_', not into the tag =="
+mkdir -p "$R/t23"; sine libmp3lame "$R/t23/x.mp3"
+tag "$R/t23/x.mp3" "Computer Face//Pure Being" "Flying Lotus"
+run "$R/t23" --steps rename --report-dir "$R/reports"
+check "name made legal"  "$([ -f "$R/t23/Computer Face__Pure Being - Flying Lotus.mp3" ] && echo yes)" "yes"
+check "tag keeps the /"  "$(python3 "$S/tagval.py" "$R/t23/Computer Face__Pure Being - Flying Lotus.mp3" title)" "Computer Face//Pure Being"
+
+echo "== T24 rules/name-overrides.txt is honoured by tags and rename =="
+mkdir -p "$R/t24"; sine libmp3lame "$R/t24/BONUS Federation - Ben Prunty.mp3"
+tag "$R/t24/BONUS Federation - Ben Prunty.mp3" "BONUS Federation" "Ben Prunty"
+run "$R/t24" --steps tags,rename --report-dir "$R/reports"
+check "override applied" "$([ -f "$R/t24/Federation - Ben Prunty.mp3" ] && echo yes)" "yes"
+check "tag agrees"       "$(python3 "$S/tagval.py" "$R/t24/Federation - Ben Prunty.mp3" title)" "Federation"
+check "override inert"   "$(python3 -c "
+import sys; sys.path.insert(0, '.')
+import music_lib as M, pathlib
+print(M.desired_name_fields(pathlib.Path('$R/t24/Federation - Ben Prunty.mp3'))[0])")" "Federation"
 
 echo "== T18 the silent steps now write reports =="
 for name in nolyrics_report.txt bilingual_report.txt romaji_report.txt tags_report.txt embed_report.txt rename_report.txt; do

@@ -131,6 +131,37 @@ def load_rule_names(path: Path) -> set[str]:
 # any recognisable credits are moved to tags) and rewritten as "[00:00.00]No lyrics".
 MANUAL_INSTRUMENTAL = load_rule_names(MANUAL_DIR / "instrumental.txt")
 
+
+def load_name_overrides(path: Path) -> dict[str, tuple[str, str | None]]:
+    """Read ``<current file stem> = <wanted title> [| <wanted artist>]`` lines.
+
+    Keyed on the file name rather than the title: two songs can share a title, and
+    an entry has to mean one file.
+    """
+    out: dict[str, tuple[str, str | None]] = {}
+    if not path.is_file():
+        print(f"Warning: rule file missing: {path}", file=sys.stderr)
+        return out
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = (part.strip() for part in line.split("=", 1))
+        if not key or not value:
+            continue
+        title, _, artist = value.partition("|")
+        out[key] = (title.strip(), artist.strip() or None)
+    return out
+
+
+# Per-file decisions that no rule can derive, keyed on the current file name.
+NAME_OVERRIDES = load_name_overrides(RULES_DIR / "name-overrides.txt")
+
+# A "/" cannot appear in a file name -- it is the path separator.  Rather than
+# skip those files or write a lookalike glyph, the *name* uses a substitute
+# while the tag keeps the real title ("Computer Face//Pure Being").
+REPLACE_IN_NAME = {"/": "_"}
+
 AUDIO_EXTS = {".mp3", ".flac", ".ogg", ".oga", ".m4a", ".mp4", ".m4b"}
 
 # How many removed lines a --dry-run shows per file before collapsing.
@@ -2114,6 +2145,17 @@ def desired_name_fields(path: Path) -> tuple[str, str, list[str]]:
     # must come out with ";" too, not only when the name carried the list.
     artist = normalize_artist(fn_artist or tag_artist)
 
+    # A human decision for this one file wins over both of the above.  It is
+    # keyed on the title the tag carries now, so once applied the entry stops
+    # matching and never fights the result.
+    override = NAME_OVERRIDES.get(path.stem)
+    if override:
+        title, forced_artist = override
+        notes.append(f"rules/name-overrides.txt: {path.stem!r} -> {title!r}")
+        if forced_artist:
+            artist = normalize_artist(forced_artist)
+            notes.append(f"rules/name-overrides.txt: artist {forced_artist!r}")
+
     title, gloss = strip_chinese_gloss(title)
     if gloss:
         notes.append(f"dropped the Chinese gloss {gloss!r}")
@@ -2123,6 +2165,18 @@ def desired_name_fields(path: Path) -> tuple[str, str, list[str]]:
         notes.append(f"dropped the trailing ' - {artist}' from the title")
 
     return title, artist, notes
+
+
+def safe_stem(title: str, artist: str) -> str:
+    """The file name stem for this title/artist: "<title> - <artist>", made legal.
+
+    Only the *name* is adjusted -- the tag keeps the real title, so nothing is
+    lost and a later run derives the same name again.
+    """
+    stem = f"{title} - {artist}" if artist else title
+    for bad, good in REPLACE_IN_NAME.items():
+        stem = stem.replace(bad, good)
+    return stem.strip().rstrip(".")
 
 
 def plan_tag_normalization(path: Path) -> TagPlan:
@@ -2397,7 +2451,7 @@ def step_rename(args: argparse.Namespace, root: Path) -> StepResult:
             result.notes.append(f"no title tag; name left alone: {path.name}")
             continue
 
-        target_stem = (f"{title} - {artist}" if artist else title).strip().rstrip(".")
+        target_stem = safe_stem(title, artist)
         problem = name_problem(target_stem)
         if problem:
             result.counts["skipped_bad_name"] += 1
