@@ -191,7 +191,7 @@ First Light - Camel.lrc
 ## 验证
 
 ```bash
-bash tests/regress.sh             # 合成曲库回归，97 项，从不访问真实曲库
+bash tests/regress.sh             # 合成曲库回归，从不访问真实曲库（末行给出总数）
 python3 tests/audit.py [目录]      # 只读审计：各步骤还会改动什么
 python3 tests/verify.py [目录]     # 只读验收：是否已符合格式，全部计数应为 0
 python3 bsm.py --dry-run           # 全流程预演，零写入

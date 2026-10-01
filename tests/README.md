@@ -3,7 +3,7 @@
 回归、只读审计与验收工具。**从不修改你的曲库** —— `regress.sh` 只在自己的临时目录
 （`tests/regress/`）里用 ffmpeg 造合成曲库。
 
-* `regress.sh` —— 97 项回归套件。运行 `bash regress.sh`，全过时退出码 0
+* `regress.sh` —— 回归套件。运行 `bash regress.sh`，末行打印总数，全过时退出码 0
 * `audit.py [音乐目录]` —— 只读审计真实曲库：每个步骤还会改什么、敞口在哪
 * `verify.py [音乐目录]` —— 只读验收：曲库是否已符合标准，**所有计数应为 0**
 * `hash.py <目录>` —— 目录内容 md5 清单，供 dry-run / 幂等性做字节级比对
