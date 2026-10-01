@@ -78,10 +78,10 @@ python3 bsm.py --dry-run              # 只预演，不写任何东西
 2. **询问** ——
 
    ```text
-   [clean] [Enter] 看报告   [y] 执行   [s] 跳过本步   [q] 退出 >
+   [clean] [Enter] show report   [y] apply   [s] skip   [q] quit >
    ```
 
-   Enter 打印报告开头（默认 60 行）后继续询问，完整清单始终在磁盘上；
+   回 Enter 打印报告开头（默认 60 行）后继续询问，完整清单始终在磁盘上；
 3. **执行** —— 只有回 `y` 才真正写入。
 
 计划阶段若发现没有任何文件需要改动，这一步会直接跳过并打印 `nothing to do`，

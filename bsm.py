@@ -2683,7 +2683,7 @@ RUNNERS = {
 }
 
 
-STEP_PROMPT_HELP = "[Enter] 看报告   [y] 执行   [s] 跳过本步   [q] 退出"
+STEP_PROMPT_HELP = "[Enter] show report   [y] apply   [s] skip   [q] quit"
 STEP_PROMPT_ANSWERS = {"y": "apply", "yes": "apply", "s": "skip", "n": "skip", "q": "quit"}
 
 
