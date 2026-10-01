@@ -8,7 +8,8 @@ The library standard it enforces:
   site metadata blob.  A song without lyrics gets exactly one line,
   ``[00:00.00]No lyrics``;
 * every line of a same-timestamp group carries that timestamp, so the original,
-  the romaji and the translation of one line stay together;
+  the romaji and the translation of one line stay together, and every timestamp
+  in a file is written with the same number of fraction digits;
 * the audio file's name is ``<title> - <artist>.<ext>``, taken from its own tags.
 
 Steps, executed in this order by default:
@@ -22,6 +23,10 @@ Steps, executed in this order by default:
     bilingual  give untimed translation/romaji lines their neighbour's
                timestamp, then group same-timestamp lines together
     romaji     move romaji lines between the original and the Chinese line
+    stamps     pad every timestamp in a file to that file's own precision
+    tags       make the tags agree with the file name
+    embed      write the .lrc back into the audio file
+    rename     rename the audio file to "<title> - <artist>"
 
 Each step runs twice in an interactive run: first in **plan** mode, which writes
 the full report and changes nothing, then -- only after you confirm it -- in
@@ -218,7 +223,7 @@ NON_LYRIC_KEYWORDS = [
 ]
 
 STEP_ORDER = [
-    "ogg", "extract", "clean", "nolyrics", "bilingual", "romaji",
+    "ogg", "extract", "clean", "nolyrics", "bilingual", "romaji", "stamps",
     "tags", "embed", "rename",
 ]
 
@@ -361,6 +366,68 @@ def pad_bare_timestamp(ts: str) -> str:
     if re.fullmatch(r"\d{1,2}:\d{2}", ts):
         return f"{ts}.00"
     return ts
+
+
+def leading_timestamps(line: str) -> list[str]:
+    """The timestamps a line starts with, in order (the ``split_lrc_line`` rule)."""
+    s = line.lstrip()
+    out: list[str] = []
+    pos = 0
+    while True:
+        m = TIMESTAMP_RE.match(s, pos)
+        if not m:
+            break
+        out.append(m.group(1))
+        pos = m.end()
+    return out
+
+
+def line_precision(line: str) -> int:
+    """How many fraction digits this line's timestamps use (0 if it has none)."""
+    widths = [
+        len(parts[2])
+        for parts in (parse_timestamp_parts(ts) for ts in leading_timestamps(line))
+        if parts is not None
+    ]
+    return max(widths) if widths else 0
+
+
+def write_timestamp(ts: str, width: int) -> str:
+    """Write one timestamp with exactly ``width`` fraction digits, zero-padded.
+
+    The fraction is positional -- ".5", ".50" and ".500" are all 500 ms -- so
+    padding to a width the value already fits in changes no value, no ordering
+    and no grouping.  A smaller width would: ".55" cut to one digit is 500 ms,
+    not 550.  That is why the caller uses the widest form the file already has.
+    """
+    parts = parse_timestamp_parts(ts)
+    if parts is None:
+        return f"[{ts}]"
+    minutes, seconds, fraction = parts
+    if width <= 0:
+        return f"[{minutes:02d}:{seconds:02d}]"
+    millis = fraction_to_ms(fraction)
+    scaled = millis // 10 ** (3 - width)
+    return f"[{minutes:02d}:{seconds:02d}.{scaled:0{width}d}]"
+
+
+def pad_line_timestamps(line: str, width: int) -> str:
+    """Rewrite a line's leading timestamps; everything else stays byte-identical."""
+    prefix = line[: len(line) - len(line.lstrip())]
+    rest = line[len(prefix):]
+    out: list[str] = []
+    pos = 0
+    while True:
+        m = TIMESTAMP_RE.match(rest, pos)
+        if not m:
+            break
+        out.append(rest[pos:m.start()])
+        out.append(write_timestamp(m.group(1), width))
+        pos = m.end()
+    if not out:
+        return line
+    out.append(rest[pos:])
+    return prefix + "".join(out)
 
 
 def adopt_untimed_lines(body: list[str]) -> list[str]:
@@ -2077,6 +2144,100 @@ def refresh_mpd() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Step: one timestamp precision per file
+# ---------------------------------------------------------------------------
+
+
+def step_stamps(args: argparse.Namespace, root: Path) -> StepResult:
+    """Give every timestamp in a file the same number of fraction digits.
+
+    Sources are inconsistent -- "[00:12]", "[00:12.5]", "[00:12.55]" and
+    "[00:12.555]" all occur, sometimes within one file.  The fraction is
+    positional, so padding everything to the widest form that file already uses
+    changes no value; it only makes the notation uniform.  A file whose
+    timestamps already agree is left untouched.
+    """
+    files = lrc_files(root)
+    print(f"  Found {len(files)} .lrc files under {root}")
+
+    result = StepResult(
+        "stamps",
+        counts={"written": 0, "skipped": 0, "stamps_padded": 0, "error": 0},
+        changed_key="written",
+    )
+    changed_log: list[str] = []
+
+    for path in files:
+        try:
+            original = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            result.counts["error"] += 1
+            result.errors.append(f"{path}: cannot read: {e}")
+            continue
+
+        lines = original.splitlines()
+        width = max((line_precision(line) for line in lines), default=0)
+        if width == 0:
+            result.counts["skipped"] += 1
+            continue
+
+        padded = sum(
+            1
+            for line in lines
+            for ts in leading_timestamps(line)
+            if write_timestamp(ts, width) != f"[{ts}]"
+        )
+        if padded == 0:
+            result.counts["skipped"] += 1
+            continue
+
+        result.counts["stamps_padded"] += padded
+        changed_log.append(
+            f"--- {path.name}   ({padded} timestamp(s) padded to {width} decimals)"
+        )
+
+        if not args.apply:
+            print(f"    WOULD PAD: {path.name}  ({padded} -> {width} decimals)")
+            result.counts["written"] += 1
+            continue
+
+        new_text = "\n".join(pad_line_timestamps(line, width) for line in lines)
+        if original.endswith("\n"):
+            new_text += "\n"
+        try:
+            if args.backup:
+                backup_text_file(path, original, args)
+            path.write_text(new_text, encoding="utf-8")
+        except OSError as e:
+            result.counts["error"] += 1
+            result.errors.append(f"{path}: cannot write: {e}")
+            continue
+        result.counts["written"] += 1
+
+    report_summary(
+        result.counts,
+        [
+            ("written", "Updated:"),
+            ("stamps_padded", "Timestamps padded:"),
+            ("skipped", "Skipped (already uniform):"),
+            ("error", "Errors:"),
+        ],
+    )
+    report = write_report(
+        args.report_dir,
+        "stamps_report.txt",
+        "Files whose timestamps were padded to one precision, the widest that file "
+        "already used.  Zero-padding is value-preserving: the fraction is positional.",
+        changed_log,
+        args,
+    )
+    if report:
+        result.notes.append(f"report: {report}")
+        result.reports.append(report)
+    return finish(result)
+
+
+# ---------------------------------------------------------------------------
 # Step: normalise the tags the file name is built from
 # ---------------------------------------------------------------------------
 
@@ -2677,6 +2838,7 @@ RUNNERS = {
     "nolyrics": step_no_lyrics,
     "bilingual": step_bilingual,
     "romaji": step_romaji,
+    "stamps": step_stamps,
     "tags": step_tags,
     "embed": step_embed,
     "rename": step_rename,

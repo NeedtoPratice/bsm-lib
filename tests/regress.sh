@@ -124,7 +124,8 @@ h1=$(python3 "$S/hash.py" "$R/t8")
 $ML "$R/t8" $FLAGS --report-dir "$R/reports" > "$R/t8.2.log" 2>&1
 h2=$(python3 "$S/hash.py" "$R/t8")
 check "first run wrote"  "$(grep -c 'Wrote title:                    1' "$R/t8.1.log")" "1"
-check "second run no-op" "$(grep -c 'Updated:                        0' "$R/t8.2.log")" "2"
+# bilingual, romaji and stamps all label their counter "Updated:"
+check "second run no-op" "$(grep -c 'Updated:                        0' "$R/t8.2.log")" "3"
 check "bytes stable"     "$([ "$h1" = "$h2" ] && echo same)" "same"
 
 echo "== T9 refresh policy =="
@@ -330,6 +331,19 @@ print(M.step_needs_asking(M.StepResult('x', **$1)))"; }
 check "no-op not asked" "$(ask "{'counts': {'written': 0}, 'changed_key': 'written'}")" "False"
 check "changes asked"   "$(ask "{'counts': {'written': 2}, 'changed_key': 'written'}")" "True"
 check "errors asked"    "$(ask "{'counts': {'written': 0}, 'errors': ['boom'], 'changed_key': 'written'}")" "True"
+
+echo "== T26 timestamps are padded to one precision per file =="
+mkdir -p "$R/t26"; sine libmp3lame "$R/t26/a.mp3"
+printf '[00:01.5]A\n[00:04.25]B\n[00:07.125]C\n' > "$R/t26/a.lrc"
+mkdir -p "$R/t26b"; sine libmp3lame "$R/t26b/b.mp3"
+printf '[00:01.50]A\n[00:04.25]B\n' > "$R/t26b/b.lrc"
+run "$R/t26" --steps stamps --report-dir "$R/reports"
+check "padded to widest"    "$(sed -n '1p' "$R/t26/a.lrc")" "[00:01.500]A"
+check "value preserved"     "$(sed -n '2p' "$R/t26/a.lrc")" "[00:04.250]B"
+check "widest untouched"    "$(sed -n '3p' "$R/t26/a.lrc")" "[00:07.125]C"
+before=$(md5sum < "$R/t26b/b.lrc")
+run "$R/t26b" --steps stamps --report-dir "$R/reports"
+check "uniform file alone"  "$(md5sum < "$R/t26b/b.lrc")" "$before"
 
 echo "== T18 the silent steps now write reports =="
 for name in nolyrics_report.txt bilingual_report.txt romaji_report.txt tags_report.txt embed_report.txt rename_report.txt; do

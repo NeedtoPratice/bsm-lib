@@ -45,6 +45,9 @@ for lrc in lrcs:
     if text == M.build_no_lyrics_lrc():
         continue  # a lyric-less file, in its finished shape
 
+    # The file's own widest form is the target; zero-padding changes no value.
+    width = max((M.line_precision(line) for line in text.splitlines()), default=0)
+
     for number, line in enumerate(text.splitlines(), 1):
         s = line.strip()
         if not s:
@@ -60,6 +63,13 @@ for lrc in lrcs:
             bad("untimed line left", f"{lrc.name}: {s[:40]}")
             continue
         timestamps, content = split
+        for ts in timestamps:
+            if M.write_timestamp(ts, width) != f"[{ts}]":
+                bad(
+                    "timestamp precision differs within the file",
+                    f"{lrc.name}:{number} [{ts}] (file uses {width} decimals)",
+                )
+                break
         if len(timestamps) > 1:
             bad("multi-timestamp line", f"{lrc.name}: {s[:40]}")
         if any(M.normalize_timestamp(ts) is None for ts in timestamps):
