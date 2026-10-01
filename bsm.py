@@ -507,6 +507,24 @@ class StepResult:
     errors: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     reports: list[Path] = field(default_factory=list)
+    # Which counter means "files this step would change".  When it is zero, and
+    # nothing errored, there is nothing to confirm -- see step_needs_asking().
+    changed_key: str | None = None
+
+    @property
+    def changed(self) -> int:
+        return self.counts.get(self.changed_key, 0) if self.changed_key else 0
+
+
+def step_needs_asking(result: StepResult) -> bool:
+    """False when a step has nothing to change, so there is nothing to confirm.
+
+    A step that would touch no file is reported and skipped instead of stopping
+    the run for an answer -- an already-conforming library should not require
+    nine confirmations to say so.  An error still stops and asks, because that
+    is something to look at.
+    """
+    return bool(result.changed or result.errors)
 
 
 def backup_dir_for(args: argparse.Namespace, path: Path) -> Path:
@@ -675,6 +693,7 @@ def step_ogg(args: argparse.Namespace, root: Path) -> StepResult:
 
     result = StepResult(
         "ogg",
+        changed_key="written",
         counts={
             "written": 0,
             "skipped_has_title": 0,
@@ -909,6 +928,7 @@ def step_extract(args: argparse.Namespace, root: Path) -> StepResult:
 
     result = StepResult(
         "extract",
+        changed_key="written",
         counts={
             "written": 0,
             "skipped_exists": 0,
@@ -1413,6 +1433,7 @@ def step_clean(args: argparse.Namespace, root: Path) -> StepResult:
     result = StepResult(
         "clean",
         counts={"cleaned": 0, "skipped_clean": 0, "skipped_no_audio": 0, "error": 0},
+        changed_key="cleaned",
     )
     removed_log: list[str] = []
     move_log: list[str] = []
@@ -1713,6 +1734,7 @@ def step_no_lyrics(args: argparse.Namespace, root: Path) -> StepResult:
 
     result = StepResult(
         "nolyrics",
+        changed_key="written",
         counts={
             "written": 0,
             "skipped_has_lyrics": 0,
@@ -1817,7 +1839,9 @@ def step_bilingual(args: argparse.Namespace, root: Path) -> StepResult:
     print(f"  Found {len(files)} .lrc files under {root}")
 
     result = StepResult(
-        "bilingual", counts={"written": 0, "skipped": 0, "truncated": 0, "error": 0}
+        "bilingual",
+        counts={"written": 0, "skipped": 0, "truncated": 0, "error": 0},
+        changed_key="written",
     )
     changed_log: list[str] = []
 
@@ -1960,7 +1984,9 @@ def step_romaji(args: argparse.Namespace, root: Path) -> StepResult:
     files = lrc_files(root)
     print(f"  Found {len(files)} .lrc files under {root}")
 
-    result = StepResult("romaji", counts={"written": 0, "skipped": 0, "error": 0})
+    result = StepResult(
+        "romaji", counts={"written": 0, "skipped": 0, "error": 0}, changed_key="written"
+    )
     changed_log: list[str] = []
 
     for path in files:
@@ -2235,7 +2261,9 @@ def step_tags(args: argparse.Namespace, root: Path) -> StepResult:
     files = audio_files(root)
     print(f"  Found {len(files)} audio files under {root}")
 
-    result = StepResult("tags", counts={"updated": 0, "skipped_ok": 0, "error": 0})
+    result = StepResult(
+        "tags", counts={"updated": 0, "skipped_ok": 0, "error": 0}, changed_key="updated"
+    )
     change_log: list[str] = []
 
     for i, path in enumerate(files, 1):
@@ -2329,6 +2357,7 @@ def step_embed(args: argparse.Namespace, root: Path) -> StepResult:
     result = StepResult(
         "embed",
         counts={"embedded": 0, "skipped_identical": 0, "skipped_no_audio": 0, "error": 0},
+        changed_key="embedded",
     )
     change_log: list[str] = []
 
@@ -2421,6 +2450,7 @@ def step_rename(args: argparse.Namespace, root: Path) -> StepResult:
 
     result = StepResult(
         "rename",
+        changed_key="renamed",
         counts={
             "renamed": 0,
             "skipped_ok": 0,
@@ -2761,6 +2791,10 @@ def main(argv: list[str] | None = None) -> int:
                 failures += 1
 
             if args.dry_run:
+                continue
+
+            if not step_needs_asking(planned):
+                print(f"  [{name}] nothing to do; skipped.")
                 continue
 
             decision = ask_step(name, planned)

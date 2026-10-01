@@ -322,6 +322,15 @@ import sys; sys.path.insert(0, '.')
 import bsm as M, pathlib
 print(M.desired_name_fields(pathlib.Path('$R/t24/Federation - Ben Prunty.mp3'))[0])")" "Federation"
 
+echo "== T25 a step with nothing to change is not confirmed =="
+ask() { python3 -c "
+import sys; sys.path.insert(0, '.')
+import bsm as M
+print(M.step_needs_asking(M.StepResult('x', **$1)))"; }
+check "no-op not asked" "$(ask "{'counts': {'written': 0}, 'changed_key': 'written'}")" "False"
+check "changes asked"   "$(ask "{'counts': {'written': 2}, 'changed_key': 'written'}")" "True"
+check "errors asked"    "$(ask "{'counts': {'written': 0}, 'errors': ['boom'], 'changed_key': 'written'}")" "True"
+
 echo "== T18 the silent steps now write reports =="
 for name in nolyrics_report.txt bilingual_report.txt romaji_report.txt tags_report.txt embed_report.txt rename_report.txt; do
     check "report $name" "$(find "$R/reports" -name "$name" | head -1 | grep -c . )" "1"
