@@ -171,9 +171,9 @@ DRY_RUN_PREVIEW_LINES = 8
 REPORT_PREVIEW_LINES = 60
 
 # Matches [MM:SS], [MM:SS.x], [MM:SS.xx], [MM:SS.xxx], [MM:SS:xx]
-TIMESTAMP_RE = re.compile(r"\[(\d{1,2}:\d{2}(?:[.:]\d{1,3})?)\]")
+TIMESTAMP_RE = re.compile(r"\[(\d+:\d{2}(?:[.:]\d{1,3})?)\]")
 
-# A line is "no real lyrics" when its normalized text contains one of these.
+# Whole-line placeholders only: a keyword inside a sung sentence is a lyric.
 PLACEHOLDER_KEYWORDS = [
     "纯音乐",
     "无歌词",
@@ -183,43 +183,8 @@ PLACEHOLDER_KEYWORDS = [
     "nolyrics",
     "nolyric",
     "instrumental",
-]
-
-# Credit/metadata lines that often appear in "instrumental / no lyrics" LRC
-# files.  They are not actual song lyrics.
-NON_LYRIC_KEYWORDS = [
-    "作词",
-    "作曲",
-    "编曲",
-    "制作人",
-    "演唱",
-    "混音",
-    "录音",
-    "监制",
-    "出品",
-    "发行",
-    "和声",
-    "贝斯",
-    "吉他",
-    "鼓",
-    "键盘",
-    "弦乐",
-    "小提琴",
-    "钢琴",
-    "writtenby",
-    "composedby",
-    "composer",
-    "lyricsby",
-    "musicby",
-    "producedby",
-    "producer",
-    "arrangedby",
-    "arranger",
-    "vocalsby",
-    "mixedby",
-    "recordedby",
-    "engineer",
-    "masteredby",
+    "纯音乐请欣赏",
+    "纯器乐请欣赏",
 ]
 
 STEP_ORDER = [
@@ -333,7 +298,8 @@ def split_lrc_line(line: str) -> tuple[list[str], str] | None:
 def parse_lrc_line(line: str) -> list[tuple[str, str]]:
     """Parse one line into (normalized [MM:SS.ff] timestamp, content) pairs.
 
-    Timestamps that cannot be represented as a sane LRC timestamp are dropped.
+    If any timestamp is invalid, leave the entire line to the caller's
+    verbatim fallback.  Partial success would silently lose playback events.
     """
     split = split_lrc_line(line)
     if split is None:
@@ -342,8 +308,9 @@ def parse_lrc_line(line: str) -> list[tuple[str, str]]:
     result: list[tuple[str, str]] = []
     for ts in timestamps:
         norm = normalize_timestamp(ts)
-        if norm is not None:
-            result.append((norm, content))
+        if norm is None:
+            return []
+        result.append((norm, content))
     return result
 
 
@@ -363,7 +330,7 @@ def pad_bare_timestamp(ts: str) -> str:
     while [00:12.3] stays [00:12.3].  Preserving it keeps a merge of the old
     scripts behaviour-neutral instead of rewriting files over zero-padding.
     """
-    if re.fullmatch(r"\d{1,2}:\d{2}", ts):
+    if re.fullmatch(r"\d+:\d{2}", ts):
         return f"{ts}.00"
     return ts
 
@@ -452,7 +419,7 @@ def adopt_untimed_lines(body: list[str]) -> list[str]:
     and the blank simply ends up after the group in the output.
     """
     out: list[str] = []
-    last_ts: str | None = None
+    last_timestamps: list[str] = []
     for line in body:
         s = line.strip()
         if not s:
@@ -461,8 +428,7 @@ def adopt_untimed_lines(body: list[str]) -> list[str]:
         split = split_lrc_line(line)
         if split:
             timestamps, _content = split
-            if timestamps and timestamp_to_ms(timestamps[0]) is not None:
-                last_ts = timestamps[0]
+            last_timestamps = timestamps
             out.append(line)
             continue
         if LRC_HEADER_RE.match(s):
@@ -471,7 +437,15 @@ def adopt_untimed_lines(body: list[str]) -> list[str]:
             # `clean` removes it; until then, leave it exactly as it is.
             out.append(line)
             continue
-        out.append(f"[{last_ts}]{s}" if last_ts else line)
+        if re.match(r"^\[[+-]?\d+:", s):
+            # An unsupported/malformed time is not an untimed translation.
+            last_timestamps = []
+            out.append(line)
+            continue
+        if last_timestamps:
+            out.extend(f"[{ts}]{s}" for ts in last_timestamps)
+        else:
+            out.append(line)
     return out
 
 
@@ -617,8 +591,7 @@ def backup_text_file(path: Path, original: str, args: argparse.Namespace) -> Pat
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(original, encoding="utf-8")
     except OSError as e:
-        print(f"    Warning: could not back up {path.name}: {e}", file=sys.stderr)
-        return None
+        raise OSError(f"could not back up {path.name}: {e}") from e
     return dest
 
 
@@ -634,21 +607,21 @@ def dump_tags(path: Path, args: argparse.Namespace) -> Path | None:
     try:
         audio = MutagenFile(path)
     except Exception as e:  # noqa: BLE001
-        print(f"    Warning: could not read tags of {path.name}: {e}", file=sys.stderr)
-        return None
+        raise OSError(f"could not read tags of {path.name}: {e}") from e
+    if audio is None:
+        raise OSError(f"could not read tags of {path.name}: unsupported audio")
     lines = [f"# tags of {path}", f"# container: {type(audio).__name__ if audio else 'unreadable'}"]
     if audio is not None and audio.tags is not None:
         for key in sorted(audio.tags.keys(), key=str):
             try:
                 lines.append(f"{key} = {audio.tags[key]!r}")
-            except Exception:  # noqa: BLE001
-                lines.append(f"{key} = <unreadable>")
+            except Exception as e:  # noqa: BLE001
+                raise OSError(f"could not back up tag {key} of {path.name}: {e}") from e
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text("\n".join(lines) + "\n", encoding="utf-8")
     except OSError as e:
-        print(f"    Warning: could not back up tags of {path.name}: {e}", file=sys.stderr)
-        return None
+        raise OSError(f"could not back up tags of {path.name}: {e}") from e
     return dest
 
 
@@ -812,24 +785,36 @@ def step_ogg(args: argparse.Namespace, root: Path) -> StepResult:
 
 
 def parse_embedded_lyrics(text: str) -> tuple[list[tuple[str, str]], dict[str, str]]:
-    """Extract timed lines and header metadata from embedded lyric text."""
+    """Extract an LRC body and metadata without discarding any lyric text.
+
+    Untimed continuations inherit all timestamps of the preceding line.
+    Other unparsed lines use an empty timestamp and survive verbatim.  Plain
+    lyrics with no timestamps at all still return an empty body.
+    """
     if text.startswith("\ufeff"):
         text = text[1:]
 
     timed: list[tuple[str, str]] = []
     meta: dict[str, str] = {}
+    has_timestamps = False
 
-    for line in text.splitlines():
+    for line in adopt_untimed_lines(text.splitlines()):
         s = line.strip()
         # rmpc only reads metadata before the first timestamp, but keeping
         # these as fallback is harmless.
         m = re.match(r"\[(ti|ar|al|au|length|offset):(.*)\]$", s)
-        if m and not timed:
+        if m and not has_timestamps:
             meta[m.group(1)] = m.group(2).strip()
             continue
-        timed.extend(parse_lrc_line(s))
+        entries = raw_timed_entries(s)
+        if entries:
+            has_timestamps = True
+            timed.extend((normalize_timestamp(ts) or f"[{ts}]", content)
+                         for ts, content in entries)
+        else:
+            timed.append(("", line))
 
-    return timed, meta
+    return (timed if has_timestamps else []), meta
 
 
 def extract_mp3_lyrics(path: Path) -> tuple[str | None, str | None]:
@@ -1522,6 +1507,8 @@ def step_clean(args: argparse.Namespace, root: Path) -> StepResult:
             result.errors.append(f"{lrc}: {e}")
             continue
 
+        # Keep the exact original for backup, including any BOM.
+        original_text = text
         # Drop a BOM so the first header tag is recognised like any other.
         had_bom = text.startswith("\ufeff")
         if had_bom:
@@ -1568,6 +1555,8 @@ def step_clean(args: argparse.Namespace, root: Path) -> StepResult:
         # Write the tags FIRST; only strip the .lrc once that succeeded.
         if resolved:
             try:
+                if args.backup:
+                    dump_tags(audio, args)
                 change_lines = write_credits_to_audio(audio, resolved)
             except Exception as e:  # noqa: BLE001 - never lose lyrics on failure
                 result.counts["error"] += 1
@@ -1587,7 +1576,7 @@ def step_clean(args: argparse.Namespace, root: Path) -> StepResult:
             # lines stay in the .lrc (duplicated, nothing lost).
             try:
                 if args.backup:
-                    backup_text_file(lrc, text, args)
+                    backup_text_file(lrc, original_text, args)
                 lrc.write_text(new_text, encoding="utf-8")
             except OSError as e:
                 result.counts["error"] += 1
@@ -1634,7 +1623,7 @@ def step_clean(args: argparse.Namespace, root: Path) -> StepResult:
 
 
 def normalize_text(s: str) -> str:
-    """Remove spaces/punctuation and lower-case for placeholder detection."""
+    """Remove spaces and lower-case for placeholder detection."""
     return re.sub(r"[\s\u3000]+", "", s).lower()
 
 
@@ -1644,14 +1633,9 @@ def is_placeholder(content: str) -> bool:
         return True  # empty lines are not real lyrics
     if norm in {"//", "/"}:
         return True
-    # Placeholder phrases can appear anywhere in the line.
-    if any(kw in norm for kw in PLACEHOLDER_KEYWORDS):
-        return True
-    # Credit/metadata lines only count as non-lyrics at the start of the line,
-    # so words like "吉他" inside real lyrics do not match.
-    if any(norm.startswith(kw) for kw in NON_LYRIC_KEYWORDS):
-        return True
-    return False
+    # Ignore punctuation around a complete known notice, never words in a
+    # sentence ("You were instrumental in my life", "鼓声响起", ...).
+    return re.sub(r"[\W_]+", "", norm) in PLACEHOLDER_KEYWORDS
 
 
 def is_metadata_line(line: str) -> bool:
@@ -1678,24 +1662,15 @@ def has_real_lyrics_in_text(text: str) -> bool:
         if not line or line.startswith("#"):
             continue
 
-        timed = parse_lrc_line(line)
-        if timed:
-            if any(not is_placeholder(content) for _, content in timed):
-                return True
+        if is_metadata_line(line):
             continue
-
-        # Untimed line: skip metadata tags and keep real lyric text.
-        if line.startswith("["):
-            if is_metadata_line(line):
-                continue
-            # e.g. "[Intro]" or "[Chorus]" could be part of lyrics; treat as
-            # real if not a placeholder.
-            if not is_placeholder(line):
+        entries = raw_timed_entries(line)
+        contents = [content for _, content in entries] if entries else [line]
+        for content in contents:
+            if (not is_placeholder(content)
+                    and parse_credit_line(content) is None
+                    and matching_notice(content) is None):
                 return True
-            continue
-
-        if not is_placeholder(line):
-            return True
 
     return False
 
@@ -2499,6 +2474,7 @@ def write_embedded_lyrics(path: Path, text: str) -> None:
         # Exactly one lyrics frame: leaving an older one behind makes readers
         # pick whichever they happen to hit first.
         tags.delall("USLT")
+        tags.delall("SYLT")
         tags.add(USLT(encoding=3, lang="eng", desc="", text=text))
         tags.save(path)
         return
@@ -2654,9 +2630,12 @@ def step_rename(args: argparse.Namespace, root: Path) -> StepResult:
             continue
 
         target = path.with_name(target_stem + path.suffix)
-        if target.exists():
+        lrc = path.with_suffix(".lrc")
+        new_lrc = target.with_suffix(".lrc")
+        conflict = target if target.exists() else new_lrc if new_lrc.exists() else None
+        if conflict is not None:
             result.counts["skipped_conflict"] += 1
-            result.notes.append(f"name taken: {target.name}   (wanted by {path.name})")
+            result.notes.append(f"name taken: {conflict.name}   (wanted by {path.name})")
             continue
         if target_stem in claimed:
             result.counts["skipped_conflict"] += 1
@@ -2673,15 +2652,15 @@ def step_rename(args: argparse.Namespace, root: Path) -> StepResult:
             result.counts["renamed"] += 1
             continue
 
-        lrc = path.with_suffix(".lrc")
-        new_lrc = target.with_suffix(".lrc")
         try:
             path.rename(target)
             if lrc.exists():
-                if new_lrc.exists():
-                    result.notes.append(f"left the .lrc alone: {new_lrc.name} exists")
-                else:
+                try:
                     lrc.rename(new_lrc)
+                except OSError:
+                    # Keep the original pairing if the second rename fails.
+                    target.rename(path)
+                    raise
         except OSError as e:
             result.counts["error"] += 1
             result.errors.append(f"{path.name}: {e}")
@@ -2940,7 +2919,7 @@ def main(argv: list[str] | None = None) -> int:
         # nothing, so the report is on disk by the time you are asked.  A
         # --dry-run run stops there; a --yes run goes straight to applying,
         # because there is nobody to ask and the report is written either way.
-        if not args.yes:
+        if args.dry_run or not args.yes:
             args.apply = False
             try:
                 planned = RUNNERS[name](args, root)

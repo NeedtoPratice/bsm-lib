@@ -349,10 +349,9 @@ echo "== T18 the silent steps now write reports =="
 for name in nolyrics_report.txt bilingual_report.txt romaji_report.txt tags_report.txt embed_report.txt rename_report.txt; do
     check "report $name" "$(find "$R/reports" -name "$name" | head -1 | grep -c . )" "1"
 done
-rep=$(find "$R/reports" -name bilingual_report.txt | head -1)
-check "bilingual lists lines" "$([ "$(grep -c 'given a timestamp' "$rep")" -gt 0 ] && echo yes)" "yes"
-rep=$(find "$R/reports" -name rename_report.txt | head -1)
-check "rename lists mapping" "$(grep -c -- '01 Remember.flac  ->  Remember - 月見ヤチヨ.flac' "$rep")" "1"
+matching_reports=$(find "$R/reports" -name bilingual_report.txt -exec grep -lF 'given a timestamp' {} +)
+check "bilingual lists lines" "$([ -n "$matching_reports" ] && echo yes)" "yes"
+check "rename lists mapping" "$(find "$R/reports" -name rename_report.txt -exec grep -lF -- '01 Remember.flac  ->  Remember - 月見ヤチヨ.flac' {} + | wc -l | tr -d ' ')" "1"
 
 echo
 echo "================================"
